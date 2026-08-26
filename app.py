@@ -110,7 +110,8 @@ def _analyser(symbole):
                 if tps: res.append((ns, e, s, max(x[1] for x in tps), tps))
         base = {"prix": float(H4["Close"]), "atr": float(H4["ATR"]), "score": score,
                 "direction": direction, "alerte": alerte, "rsi_d1": float(D1["RSI"]),
-                "etat_w": etat_cloud(W1), "etat_d": etat_cloud(D1), "etat_h4": etat_cloud(H4)}
+                "etat_w": etat_cloud(W1), "etat_d": etat_cloud(D1), "etat_h4": etat_cloud(H4),
+                "date_h4": h4.index[-1]}
         if direction == "ATTENTE" or not res:
             base.update({"scenario": "-", "entree": None, "stop": None, "rr": None, "tps": [],
                          "statut": "ATTENTE" if direction == "ATTENTE" else "REJETÉ"})
@@ -122,11 +123,11 @@ def _analyser(symbole):
     except Exception:
         return None
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)   # prix frais : 15 minutes
 def analyser_actif(symbole):
     return _analyser(symbole)
 
-# ================= DONNÉES EXTERNES (cache anti-429) =================
+# ================= DONNÉES EXTERNES =================
 @st.cache_data(ttl=43200)
 def get_regime():
     key = os.environ.get("FRED_API_KEY", "")
@@ -190,7 +191,7 @@ def get_positionnement():
         pass
     return out
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=900)
 def get_metaux():
     try:
         g = yf.Ticker("GC=F").history(interval="1d", period="1y")["Close"]
@@ -252,6 +253,7 @@ h2{font-size:18px;margin:0} .sym{color:#94a3b8;font-size:13px}
 .badge{padding:4px 12px;border-radius:999px;font-weight:700;font-size:12px;color:#fff}
 .ok{background:#16a34a} .warn{background:#d97706} .no{background:#dc2626} .wait{background:#64748b}
 .verdict{color:#38bdf8;font-weight:600;margin:8px 0}
+.prix{color:#e2e8f0;font-size:13px}
 table{width:100%;border-collapse:collapse;margin:8px 0}
 th,td{padding:8px 6px;border-bottom:1px solid #334155;text-align:left;font-size:14px}
 .niveaux td{font-size:16px;font-weight:700}
@@ -262,12 +264,15 @@ th,td{padding:8px 6px;border-bottom:1px solid #334155;text-align:left;font-size:
 
 # ================= INTERFACE =================
 st.title("📊 Rapport de trading")
-st.caption("Document d'analyse — pas un conseil personnalisé.")
+st.caption("Document d'analyse — pas un conseil personnalisé. Prix Yahoo (délai possible de quelques minutes).")
 
 capital = st.sidebar.number_input("Capital simulé (€)", min_value=10.0, value=100.0, step=10.0)
 st.sidebar.markdown("---")
 st.sidebar.write("**Routine quotidienne**")
 st.sidebar.write("1. Générer l'analyse\n2. Lire les cartes\n3. Télécharger le journal")
+if st.sidebar.button("🧹 Forcer des prix frais"):
+    st.cache_data.clear()
+    st.sidebar.success("Cache vidé. Clique sur Générer.")
 
 if st.button("🔄 Générer l'analyse du jour", type="primary"):
     with st.spinner("Analyse en cours (environ 1 minute)..."):
@@ -299,6 +304,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             metal = sym in METAUX
             p = positionnement.get(coin)
             histo = STATS.get(sym, "n/a (pas de backtest pour cet actif)")
+            h4_txt = pd.Timestamp(r["date_h4"]).strftime("%d/%m %Hh UTC") if r.get("date_h4") is not None else "?"
 
             taille_html = ""
             risque_e = taille_e = unites = None
@@ -325,6 +331,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
               <div class='top'><h2>{nom} <span class='sym'>{sym}</span></h2>
               <span class='badge {badge_classe(r)}'>{r['statut']}</span></div>
               <p class='verdict'>{r['direction']} — scénario {r['scenario']}</p>
+              <p class='prix'>Prix actuel : <b>{r['prix']:.2f}</b> | dernière bougie H4 cloturée : {h4_txt}</p>
               <table><tr><th>Entrée</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th></tr>
               <tr class='niveaux'><td>{fmt(r['entree'])}</td><td>{fmt(r['stop'])}</td>
               <td>{tp1}</td><td>{tp2}</td><td>{tp3}</td></tr></table>
@@ -337,7 +344,8 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
 
             lignes_journal.append({"date": pd.Timestamp.now().date(), "actif": sym,
                                    "direction": r["direction"], "scenario": r["scenario"],
-                                   "statut": r["statut"], "entree": r["entree"], "stop": r["stop"],
+                                   "statut": r["statut"], "prix_actuel": round(r["prix"], 2),
+                                   "entree": r["entree"], "stop": r["stop"],
                                    "tp1": tp1, "tp2": tp2, "tp3": tp3, "risque_e": risque_e,
                                    "taille_e": taille_e, "unites": unites, "historique_regime": histo})
 
@@ -348,11 +356,10 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         {metaux_html}
         {cartes}
         <div class='conseil'>Rappel : aucun trade réel sans confirmation du prix, sans respect du stop,
-        et sans paper trading validé.</div>
+        et sans paper trading validé. Pour un suivi continu, place des alertes TradingView sur les niveaux d'entrée/stop.</div>
         </body></html>"""
 
-        # Affichage garanti du rapport (page complète dans un cadre à faire défiler)
-        components.html(html, height=4000, scrolling=True)
+        components.html(html, height=4200, scrolling=True)
 
         csv = pd.DataFrame(lignes_journal).to_csv(index=False).encode("utf-8")
         st.download_button("📥 Télécharger le journal CSV", csv,
