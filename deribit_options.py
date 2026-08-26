@@ -1,16 +1,18 @@
-# Options Deribit (API publique, sans clé) : IV, skew, max pain, volume + GEX estimé
+# Options Deribit (API publique) : IV, skew, max pain, volume + GEX estimé
 import math
 from datetime import datetime
 import requests
 import streamlit as st
 
+HEADERS = {"User-Agent": "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) "
+                         "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/604.1"}
 MAPPING = {"BTC-USD": "BTC", "ETH-USD": "ETH"}
 
 def _pdf(x):
     return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
 
 def _parse(name):
-    p = name.split("-")  # ex : BTC-27JUN25-110000-C
+    p = name.split("-")
     if len(p) != 4:
         return None
     try:
@@ -21,11 +23,11 @@ def _parse(name):
 @st.cache_data(ttl=1800)
 def _donnees(currency):
     r = requests.get("https://www.deribit.com/api/v2/public/get_book_summary_by_currency",
-                     params={"currency": currency, "kind": "option"}, timeout=15)
+                     params={"currency": currency, "kind": "option"}, headers=HEADERS, timeout=15)
     r.raise_for_status()
     items = r.json().get("result", [])
     ri = requests.get("https://www.deribit.com/api/v2/public/get_index_price",
-                      params={"index_name": f"{currency}_USD"}, timeout=10)
+                      params={"index_name": f"{currency}_USD"}, headers=HEADERS, timeout=10)
     S = float(ri.json()["result"]["index_price"])
     opts = []
     for it in items:
@@ -48,9 +50,11 @@ def get_options_deribit(symbol):
         return None
     try:
         S, opts = _donnees(cur)
-    except Exception:
+    except Exception as e:
+        print("DERIBIT erreur (_donnees):", e)
         return None
     if not opts:
+        print("DERIBIT : aucune option valide pour", cur)
         return None
     w = [o for o in opts if o["vol"] > 0]
     iv_moy = (sum(o["iv"] * o["vol"] for o in w) / sum(o["vol"] for o in w) * 100) if w \
@@ -85,7 +89,8 @@ def estimer_gex_deribit(currency):
     """GEX estimé (heuristique de recherche, convention calls + / puts -)."""
     try:
         S, opts = _donnees(currency)
-    except Exception:
+    except Exception as e:
+        print("DERIBIT erreur (gex):", e)
         return None
     if not opts:
         return None
