@@ -554,3 +554,57 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
                            file_name="journal_signaux.csv", mime="text/csv")
 else:
     st.info("Clique sur « Générer l'analyse du jour » pour produire le rapport complet.")
+
+# ================= PACK 2 : JOURNAL DE PAPER TRADING =================
+try:
+    st.markdown("## 📒 Journal de paper trading")
+    up = st.file_uploader("Charge ton journal CSV précédent (pour continuer la série)", type=["csv"])
+    trades = []
+    if up is not None:
+        try:
+            trades = pd.read_csv(up).to_dict("records")
+        except Exception:
+            st.warning("CSV illisible — journal vierge.")
+
+    with st.expander("➕ Ajouter un trade simulé"):
+        with st.form("form_trade"):
+            c1, c2 = st.columns(2)
+            actif = c1.selectbox("Actif", ["BTC-USD", "ETH-USD", "SOL-USD", "GC=F", "SI=F", "^GSPC", "^NDX"])
+            direction = c2.selectbox("Sens", ["LONG", "SHORT"])
+            entree = st.number_input("Prix d'entrée", value=0.0, format="%.2f")
+            stop = st.number_input("Stop", value=0.0, format="%.2f")
+            tp = st.number_input("Prix de sortie (0 si encore ouvert)", value=0.0, format="%.2f")
+            issue = st.selectbox("Issue", ["ouvert", "stop", "sortie"])
+            note = st.text_input("Note (discipline, émotion, contexte)")
+            ok = st.form_submit_button("Ajouter au journal")
+        if ok and entree > 0 and stop > 0 and stop != entree:
+            risk = abs(entree - stop)
+            if issue == "stop":
+                r_res = -1.0
+            elif issue == "sortie" and tp > 0:
+                r_res = (tp - entree) / risk if direction == "LONG" else (entree - tp) / risk
+            else:
+                r_res = 0.0
+            trades.append({"date": str(pd.Timestamp.now().date()), "actif": actif,
+                           "direction": direction, "entree": entree, "stop": stop,
+                           "sortie": tp, "issue": issue, "R": round(r_res, 2), "note": note})
+
+    if trades:
+        dfj = pd.DataFrame(trades)
+        clos = dfj[dfj["issue"].isin(["stop", "sortie"])]
+        wr = (clos["R"] > 0).mean() * 100 if len(clos) else 0.0
+        cum = float(clos["R"].sum()) if len(clos) else 0.0
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Trades (total)", len(dfj))
+        m2.metric("Win rate (clos)", f"{wr:.0f} %")
+        m3.metric("R cumulé", f"{cum:+.2f}")
+        if cum <= -2.0:
+            st.error("🛑 CIRCUIT BREAKER : −2 R atteint → pause jusqu'à lundi. Le capital d'abord.")
+        st.dataframe(dfj, use_container_width=True)
+        st.download_button("💾 Télécharger le journal mis à jour",
+                           dfj.to_csv(index=False).encode("utf-8"),
+                           file_name="journal_paper_trading.csv", mime="text/csv")
+    else:
+        st.info("Aucun trade enregistré pour l'instant. Ajoute ton premier trade simulé quand un signal est confirmé.")
+except Exception as e:
+    st.warning(f"Section journal indisponible : {e}")
