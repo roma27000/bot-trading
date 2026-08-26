@@ -1,12 +1,22 @@
 # Options Deribit (API publique) : IV, skew, max pain, volume + GEX estimé
+# v3 : navigation "navigateur" (curl_cffi) + journaux d'erreurs
 import math
 from datetime import datetime
-import requests
 import streamlit as st
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) "
-                         "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/604.1"}
+try:
+    from curl_cffi import requests as _req
+    _CURL = True
+except Exception:
+    import requests as _req
+    _CURL = False
+
 MAPPING = {"BTC-USD": "BTC", "ETH-USD": "ETH"}
+
+def _get(url, params=None, timeout=15):
+    if _CURL:
+        return _req.get(url, params=params, impersonate="chrome", timeout=timeout)
+    return _req.get(url, params=params, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
 
 def _pdf(x):
     return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
@@ -22,12 +32,12 @@ def _parse(name):
 
 @st.cache_data(ttl=1800)
 def _donnees(currency):
-    r = requests.get("https://www.deribit.com/api/v2/public/get_book_summary_by_currency",
-                     params={"currency": currency, "kind": "option"}, headers=HEADERS, timeout=15)
+    r = _get("https://www.deribit.com/api/v2/public/get_book_summary_by_currency",
+             params={"currency": currency, "kind": "option"})
     r.raise_for_status()
     items = r.json().get("result", [])
-    ri = requests.get("https://www.deribit.com/api/v2/public/get_index_price",
-                      params={"index_name": f"{currency}_USD"}, headers=HEADERS, timeout=10)
+    ri = _get("https://www.deribit.com/api/v2/public/get_index_price",
+              params={"index_name": f"{currency}_USD"}, timeout=10)
     S = float(ri.json()["result"]["index_price"])
     opts = []
     for it in items:
@@ -51,7 +61,7 @@ def get_options_deribit(symbol):
     try:
         S, opts = _donnees(cur)
     except Exception as e:
-        print("DERIBIT erreur (_donnees):", e)
+        print("DERIBIT erreur:", repr(e))
         return None
     if not opts:
         print("DERIBIT : aucune option valide pour", cur)
@@ -90,7 +100,7 @@ def estimer_gex_deribit(currency):
     try:
         S, opts = _donnees(currency)
     except Exception as e:
-        print("DERIBIT erreur (gex):", e)
+        print("DERIBIT erreur (gex):", repr(e))
         return None
     if not opts:
         return None
