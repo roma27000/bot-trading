@@ -4,6 +4,8 @@ import pandas as pd
 import requests
 import streamlit as st
 
+HEADERS = {"User-Agent": "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) "
+                         "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/604.1"}
 CIBLES = {
     "GC=F": ("https://www.cftc.gov/files/dea/history/com_dis_txt.zip", "GOLD", "dis"),
     "SI=F": ("https://www.cftc.gov/files/dea/history/com_dis_txt.zip", "SILVER", "dis"),
@@ -12,7 +14,7 @@ CIBLES = {
 
 @st.cache_data(ttl=604800)  # 7 jours
 def _charger(url):
-    r = requests.get(url, timeout=90)
+    r = requests.get(url, timeout=120, headers=HEADERS)
     r.raise_for_status()
     z = zipfile.ZipFile(io.BytesIO(r.content))
     df = pd.read_csv(z.open(z.namelist()[0]), on_bad_lines="skip")
@@ -37,6 +39,7 @@ def get_cot(symbol):
         dcol = _col(df, ["REPORT", "DATE"]) or _col(df, ["DATE"])
         sub = df[df[mcol].astype(str).str.contains(mot, na=False)].copy()
         if sub.empty or not dcol:
+            print("COT : marché introuvable pour", symbol)
             return None
         sub[dcol] = pd.to_datetime(sub[dcol], errors="coerce")
         sub = sub.dropna(subset=[dcol]).sort_values(dcol)
@@ -48,6 +51,7 @@ def get_cot(symbol):
             sh = _col(sub, ["NONCOMMERCIAL", "SHORT"]) or _col(sub, ["NON-COMMERCIAL", "SHORT"])
             clg, csh = _col(sub, ["COMMERCIAL", "LONG"], ["SHORT", "NON"]), _col(sub, ["COMMERCIAL", "SHORT"], ["NON"])
         if not lg or not sh:
+            print("COT : colonnes positions introuvables pour", symbol)
             return None
         an = sub.tail(53)
         net = (pd.to_numeric(an[lg], errors="coerce") - pd.to_numeric(an[sh], errors="coerce")).dropna()
@@ -64,5 +68,6 @@ def get_cot(symbol):
         return {"net_position_commercials": com, "net_position_noncommercials": cur,
                 "changement_semaine": cur - prev,
                 "percentile_1an": float((net <= cur).mean() * 100), "cot_source": "CFTC"}
-    except Exception:
+    except Exception as e:
+        print("COT erreur:", e)
         return None
