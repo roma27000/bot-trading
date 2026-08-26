@@ -1,8 +1,9 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import yfinance as yf
 import requests
-import os
+import os, time
 
 st.set_page_config(page_title="Bot Trading", layout="wide")
 
@@ -125,7 +126,7 @@ def _analyser(symbole):
 def analyser_actif(symbole):
     return _analyser(symbole)
 
-# ================= DONNÉES EXTERNES (avec cache anti-429) =================
+# ================= DONNÉES EXTERNES (cache anti-429) =================
 @st.cache_data(ttl=43200)
 def get_regime():
     key = os.environ.get("FRED_API_KEY", "")
@@ -203,7 +204,7 @@ def get_metaux():
     except Exception:
         return {}
 
-# ================= AIDE À LA LECTURE =================
+# ================= LECTURE & CONSEILS =================
 def lecture_metaux(m):
     if not m: return "Données or/argent indisponibles."
     n = []
@@ -340,16 +341,18 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
                                    "tp1": tp1, "tp2": tp2, "tp3": tp3, "risque_e": risque_e,
                                    "taille_e": taille_e, "unites": unites, "historique_regime": histo})
 
-        html = f"""{CSS}
+        html = f"""<!DOCTYPE html><html lang='fr'><head><meta charset='utf-8'>{CSS}</head><body>
         <h1>📊 Rapport de trading — {pd.Timestamp.now().strftime('%d/%m/%Y')}</h1>
         <div class='meta'>Régime macro : <b>{regime_actuel}</b> | Capital : {capital:.0f} € |
         Risque modulé : <b>{risque_pct} %</b> par trade</div>
         {metaux_html}
         {cartes}
         <div class='conseil'>Rappel : aucun trade réel sans confirmation du prix, sans respect du stop,
-        et sans paper trading validé.</div>"""
+        et sans paper trading validé.</div>
+        </body></html>"""
 
-        st.markdown(html, unsafe_allow_html=True)
+        # Affichage garanti du rapport (page complète dans un cadre à faire défiler)
+        components.html(html, height=4000, scrolling=True)
 
         csv = pd.DataFrame(lignes_journal).to_csv(index=False).encode("utf-8")
         st.download_button("📥 Télécharger le journal CSV", csv,
