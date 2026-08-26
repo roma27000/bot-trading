@@ -8,7 +8,6 @@ import gex_dex, deribit_options, cot_data
 
 st.set_page_config(page_title="Bot Trading Pro", layout="wide")
 
-# ================= FLAGS & RÉGLAGES =================
 USE_GEX_DEX = True
 USE_COT = True
 USE_OPTIONS = True
@@ -132,7 +131,7 @@ def _analyser(symbole):
 def analyser_actif(symbole):
     return _analyser(symbole)
 
-# ================= DONNÉES EXTERNES (existantes) =================
+# ================= DONNÉES EXTERNES =================
 @st.cache_data(ttl=43200)
 def get_regime():
     key = os.environ.get("FRED_API_KEY", "")
@@ -210,7 +209,43 @@ def get_metaux():
     except Exception:
         return {}
 
-# ================= LECTURE & CONSEILS (enrichis) =================
+# ================= PÉDAGOGIE & LECTURE SIMPLE =================
+CONCEPTS = """
+<div class='card'><div class='top'><h2>📚 Comprendre les couches avancées (langage simple)</h2></div>
+<p><b>IV (volatilité implicite)</b> = l'agitation que le marché <i>attend</i>. Comme la météo : IV élevée = tempête attendue ; IV basse = temps calme.</p>
+<p><b>Skew put/call</b> = le prix de la peur. Si les “puts” (protections contre la baisse) sont plus chers que les “calls” (paris hausse), le marché se protège → peur présente.</p>
+<p><b>Max pain</b> = le prix où les acheteurs d'options perdent le plus à l'expiration ; souvent un “aimant” en fin de semaine.</p>
+<p><b>GEX</b> = le sens des amortisseurs. GEX positif = les gros acteurs calmant le jeu (marché stable, cassures moins fiables) ; GEX négatif = ils amplifient (marché nerveux, mouvements accélérés).</p>
+<p><b>DEX</b> = le biais directionnel des market-makers (haussier / baissier / neutre).</p>
+<p><b>COT</b> = le positionnement des “gros” (spéculateurs vs professionnels). Un percentile extrême = foule déjà pleine d'un côté → risque de retournement.</p>
+<p class='histo'>Règle d'or : ces couches <b>informent et modulent la taille</b> ; elles ne déclenchent jamais un trade. La technique (tendance + cassure + R:R) décide.</p></div>
+"""
+
+def lecture_options_simple(opt, gex):
+    """Explique les chiffres en langage courant, pour débutant."""
+    if not opt and not gex:
+        return None
+    ph = []
+    if opt:
+        iv = opt.get("iv_moyen_24h")
+        if iv is not None:
+            if iv > 80: ph.append(f"Volatilité très élevée ({iv:.0f} %) : le marché s'attend à de très gros mouvements → prudence et tailles réduites.")
+            elif iv > 55: ph.append(f"Volatilité élevée ({iv:.0f} %) : le marché s'attend à de gros mouvements → attends des confirmations nettes.")
+            elif iv > 35: ph.append(f"Volatilité modérée ({iv:.0f} %) : marché plutôt calme → les signaux techniques sont plus fiables.")
+            else: ph.append(f"Volatilité basse ({iv:.0f} %) : marché très calme → méfie-toi des faux calmes avant tempête.")
+        sk = opt.get("skew_put_call")
+        if sk is not None:
+            if sk > 8: ph.append("Les protections contre la baisse coûtent cher : le marché a peur → les replis peuvent être violents.")
+            elif sk < -5: ph.append("Les paris sur la hausse coûtent cher : appétit haussier → ne pas courir après le prix, laisser venir les replis.")
+            else: ph.append("Peur et appétit sont équilibrés : pas de stress particulier dans les options.")
+        mp = opt.get("max_pain")
+        if mp: ph.append(f"Le “max pain” ({mp:,.0f}) agit comme un aimant de fin de semaine : le prix a tendance à s'en rapprocher à l'expiration.")
+    if gex:
+        if gex.get("gex_regime") == "POS": ph.append("GEX positif : les market-makers amortissent les mouvements → marché stabilisé, range favorisé, casse à confirmer deux fois.")
+        elif gex.get("gex_regime") == "NEG": ph.append("GEX négatif : les market-makers amplifient les mouvements → marché nerveux, cassures accélérées mais retournements violents : stops stricts.")
+    return " ".join(ph)
+
+# ================= CONSEILS =================
 def lecture_metaux(m):
     if not m: return "Données or/argent indisponibles."
     n = []
@@ -240,13 +275,12 @@ def conseil_systeme(r, reg, metal, gex=None, cot=None, opt=None):
     if r["alerte"] or "SWING" in d:
         t.append("Contexte fragile : <b>taille réduite</b>, ne pas courir après le prix.")
     t.append("Sorties par tiers (TP1/TP2/TP3) ; après TP1, remonter le stop au prix d'entrée.")
-    # --- Bonus couches avancées (0-2 phrases, jamais bloquant) ---
     bonus = []
     if gex:
         if gex["gex_regime"] == "POS" and "LONG" in d:
-            bonus.append("GEX positif : market makers stabilisateurs, environnement favorable au long.")
+            bonus.append("GEX positif : marché stabilisé, favorable à un long confirmé.")
         elif gex["gex_regime"] == "NEG" and "LONG" in d:
-            bonus.append("GEX négatif : marché nerveux, volatilité amplifiée, prudence sur le long.")
+            bonus.append("GEX négatif : marché nerveux, prudence sur le long.")
         elif gex["gex_regime"] == "NEG" and "SHORT" in d:
             bonus.append("GEX négatif : environnement instable, cohérent avec un short prudent.")
     if cot and cot.get("percentile_1an") is not None:
@@ -359,30 +393,27 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             if p is not None and p.get("funding") is not None:
                 pos_html = f"<p>Positionnement : funding {p['funding']:.4f} %/8h | OI {p['oi']/1e9:.1f} Md$</p>"
 
-            # --- Lignes des couches avancées (1 ligne max par couche) ---
+            # --- Couches avancées + lecture simple ---
             lignes = []
             if USE_GEX_DEX:
                 if gex:
-                    lignes.append(f"GEX : {gex['gex_regime']} | Flip : {fmt(gex['gex_flip'])} | "
-                                  f"DEX : {gex['dex_biais']} | Force : {gex['gex_strength']:+d} "
-                                  f"<span style='color:#64748b'>({gex['gex_source']})</span>")
+                    lignes.append(f"GEX : {gex['gex_regime']} | Flip : {fmt(gex['gex_flip'])} | DEX : {gex['dex_biais']} | Force : {gex['gex_strength']:+d} ({gex['gex_source']})")
                 else:
-                    lignes.append("<span style='color:#64748b'>GEX/DEX : non disponible</span>")
+                    lignes.append("<span style='color:#64748b'>GEX/DEX : non disponible aujourd'hui</span>")
             if USE_COT:
                 if cot:
-                    lignes.append(f"COT : Non-commercials net {cot['net_position_noncommercials']:,.0f} | "
-                                  f"Δ semaine : {cot['changement_semaine']:+,.0f} | "
-                                  f"Percentile 1an : {cot['percentile_1an']:.0f} %")
+                    lignes.append(f"COT : Non-commercials net {cot['net_position_noncommercials']:,.0f} | Δ semaine : {cot['changement_semaine']:+,.0f} | Percentile 1 an : {cot['percentile_1an']:.0f} %")
                 else:
-                    lignes.append("<span style='color:#64748b'>COT : non disponible</span>")
+                    lignes.append("<span style='color:#64748b'>COT : non disponible (CFTC anti-robots) — couche reportée</span>")
             if USE_OPTIONS:
                 if opt:
-                    lignes.append(f"Options Deribit : IV 24h : {opt['iv_moyen_24h']:.0f} % | "
-                                  f"Skew : {fmt(opt['skew_put_call'])} | Max pain : {fmt(opt['max_pain'])} | "
-                                  f"Vol : {opt['volume_24h']:,.0f}")
+                    lignes.append(f"Options Deribit : IV 24h : {opt['iv_moyen_24h']:.0f} % | Skew : {fmt(opt['skew_put_call'])} | Max pain : {fmt(opt['max_pain'])} | Vol : {opt['volume_24h']:,.0f}")
                 elif sym in ("BTC-USD", "ETH-USD"):
-                    lignes.append("<span style='color:#64748b'>Options Deribit : non disponible</span>")
+                    lignes.append("<span style='color:#64748b'>Options Deribit : non disponible aujourd'hui (serveur protégé) — chiffres dans le LAB Colab hebdo</span>")
+            lect = lecture_options_simple(opt, gex)
             layers_html = f"<div class='layers'>{'<br>'.join(lignes)}</div>" if lignes else ""
+            if lect:
+                layers_html += f"<div class='conseil'>📖 Lecture simple : {lect}</div>"
 
             cartes += f"""
             <div class='card'>
@@ -425,12 +456,13 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         <div class='meta'>Régime macro : <b>{regime_actuel}</b> | Capital : {capital:.0f} € |
         Risque modulé : <b>{risque_pct} %</b> par trade | Couches : GEX/DEX, COT, Options Deribit</div>
         {metaux_html}
+        {CONCEPTS}
         {cartes}
         <div class='conseil'>Rappel : aucun trade réel sans confirmation du prix, sans respect du stop,
-        et sans paper trading validé. Les couches GEX/DEX/COT/Options sont informatives et ne remplacent pas l'analyse technique.</div>
+        et sans paper trading validé. Les couches avancées informent et modulent la taille ; la technique décide.</div>
         </body></html>"""
 
-        components.html(html, height=4800, scrolling=True)
+        components.html(html, height=5600, scrolling=True)
 
         csv = pd.DataFrame(lignes_journal).to_csv(index=False).encode("utf-8")
         st.download_button("📥 Télécharger le journal CSV", csv,
