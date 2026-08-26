@@ -1,20 +1,30 @@
 # COT hebdomadaire via fichiers historiques CFTC (ZIP CSV), sans clé
+# v3 : navigation "navigateur" (curl_cffi) + journaux d'erreurs
 import io, zipfile
 import pandas as pd
-import requests
 import streamlit as st
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) "
-                         "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/604.1"}
+try:
+    from curl_cffi import requests as _req
+    _CURL = True
+except Exception:
+    import requests as _req
+    _CURL = False
+
 CIBLES = {
     "GC=F": ("https://www.cftc.gov/files/dea/history/com_dis_txt.zip", "GOLD", "dis"),
     "SI=F": ("https://www.cftc.gov/files/dea/history/com_dis_txt.zip", "SILVER", "dis"),
     "^GSPC": ("https://www.cftc.gov/files/dea/history/fut_fin_txt.zip", "S&P 500", "fin"),
 }
 
+def _get(url, timeout=120):
+    if _CURL:
+        return _req.get(url, impersonate="chrome", timeout=timeout)
+    return _req.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+
 @st.cache_data(ttl=604800)  # 7 jours
 def _charger(url):
-    r = requests.get(url, timeout=120, headers=HEADERS)
+    r = _get(url)
     r.raise_for_status()
     z = zipfile.ZipFile(io.BytesIO(r.content))
     df = pd.read_csv(z.open(z.namelist()[0]), on_bad_lines="skip")
@@ -56,6 +66,7 @@ def get_cot(symbol):
         an = sub.tail(53)
         net = (pd.to_numeric(an[lg], errors="coerce") - pd.to_numeric(an[sh], errors="coerce")).dropna()
         if len(net) < 10:
+            print("COT : historique trop court pour", symbol)
             return None
         cur, prev = float(net.iloc[-1]), float(net.iloc[-2])
         com = None
@@ -69,5 +80,5 @@ def get_cot(symbol):
                 "changement_semaine": cur - prev,
                 "percentile_1an": float((net <= cur).mean() * 100), "cot_source": "CFTC"}
     except Exception as e:
-        print("COT erreur:", e)
+        print("COT erreur:", repr(e))
         return None
