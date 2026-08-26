@@ -1,12 +1,26 @@
-# Options Deribit (API publique) : IV, skew, max pain, volume + GEX estimé
-# v4 : 1 seul appel, prix via underlying_price + journaux d'erreurs
+# Options Deribit : IV, skew, max pain, volume + GEX estimé
+# v5 : transport "navigateur" (curl_cffi) puis requests + prix via underlying_price
 import math
 from datetime import datetime
-import requests
 import streamlit as st
+
+try:
+    from curl_cffi import requests as _cr
+    _CURL = True
+except Exception:
+    _CURL = False
+import requests as _rq
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "*/*"}
 MAPPING = {"BTC-USD": "BTC", "ETH-USD": "ETH"}
+
+def _get(url, params=None, timeout=20):
+    if _CURL:
+        try:
+            return _cr.get(url, params=params, impersonate="chrome", timeout=timeout)
+        except Exception:
+            pass
+    return _rq.get(url, params=params, headers=UA, timeout=timeout)
 
 def _pdf(x): return math.exp(-0.5*x*x)/math.sqrt(2*math.pi)
 
@@ -18,18 +32,16 @@ def _parse(name):
 
 @st.cache_data(ttl=1800)
 def _donnees(currency):
-    r = requests.get("https://www.deribit.com/api/v2/public/get_book_summary_by_currency",
-                     params={"currency": currency, "kind": "option"}, headers=UA, timeout=20)
+    r = _get("https://www.deribit.com/api/v2/public/get_book_summary_by_currency",
+             params={"currency": currency, "kind": "option"})
     r.raise_for_status()
     d = r.json()
     if "result" not in d:
         raise Exception(str(d.get("error", {}))[:120])
     items = d["result"]
-    if not items:
-        raise Exception("livre vide")
+    if not items: raise Exception("livre vide")
     S = float(items[0].get("underlying_price") or 0)
-    if S <= 0:
-        raise Exception("prix sous-jacent absent")
+    if S <= 0: raise Exception("prix sous-jacent absent")
     opts = []
     for it in items:
         pa = _parse(it.get("instrument_name", ""))
