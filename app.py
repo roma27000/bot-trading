@@ -15,6 +15,8 @@ USE_DEBUG = False
 RR_MIN = 1.5
 METAUX = ["GC=F", "SI=F"]
 RISQUE_PAR_REGIME = {"RISK-ON": 1.0, "NEUTRE": 0.5, "RISK-OFF": 0.25}
+PLAFOND_TOTAL = 2.0          # % max de risque si tous les trades se déclenchent
+SEUIL_ZONE = 2.0             # % de distance = "zone alerte"
 
 STATS = {
     "BTC-USD": "NEUTRE : 50 % (IC 26-74) n=16 +0.37R — tous régimes : 58 % n=62 +0.66R",
@@ -215,7 +217,7 @@ CONCEPTS = """
 <p><b>IV (volatilité implicite)</b> = l'agitation que le marché <i>attend</i>. Comme la météo : IV élevée = tempête attendue ; IV basse = temps calme.</p>
 <p><b>Skew put/call</b> = le prix de la peur. Si les “puts” (protections contre la baisse) sont plus chers que les “calls” (paris hausse), le marché se protège → peur présente.</p>
 <p><b>Max pain</b> = le prix où les acheteurs d'options perdent le plus à l'expiration ; souvent un “aimant” en fin de semaine.</p>
-<p><b>GEX</b> = le sens des amortisseurs. GEX positif = les gros acteurs calmant le jeu (marché stable, cassures moins fiables) ; GEX négatif = ils amplifient (marché nerveux, mouvements accélérés).</p>
+<p><b>GEX</b> = le sens des amortisseurs. GEX positif = les gros acteurs calmant le jeu (marché stable, cassures moins fiables) ; GEX négatif = ils amplifient (marché nerveux).</p>
 <p><b>DEX</b> = le biais directionnel du positionnement options (haussier / baissier / neutre).</p>
 <p><b>COT</b> = le positionnement des “gros” (spéculateurs vs professionnels). Un percentile extrême = foule déjà pleine d'un côté → risque de retournement.</p>
 <p class='histo'>Règle d'or : ces couches <b>informent et modulent la taille</b> ; elles ne déclenchent jamais un trade. La technique (tendance + cassure + R:R) décide.</p></div>
@@ -228,22 +230,20 @@ def lecture_options_simple(opt, gex):
     if opt:
         iv = opt.get("iv_moyen_24h")
         if iv is not None:
-            if iv > 80: ph.append(f"Volatilité très élevée ({iv:.0f} %) : le marché s'attend à de très gros mouvements → prudence et tailles réduites.")
-            elif iv > 55: ph.append(f"Volatilité élevée ({iv:.0f} %) : le marché s'attend à de gros mouvements → attends des confirmations nettes.")
-            elif iv > 35: ph.append(f"Volatilité modérée ({iv:.0f} %) : marché plutôt calme → les signaux techniques sont plus fiables.")
-            else: ph.append(f"Volatilité basse ({iv:.0f} %) : marché très calme → méfie-toi des faux calmes avant tempête.")
+            if iv > 80: ph.append(f"Volatilité très élevée ({iv:.0f} %) : prudence et tailles réduites.")
+            elif iv > 55: ph.append(f"Volatilité élevée ({iv:.0f} %) : attends des confirmations nettes.")
+            elif iv > 35: ph.append(f"Volatilité modérée ({iv:.0f} %) : marché plutôt calme, signaux techniques plus fiables.")
+            else: ph.append(f"Volatilité basse ({iv:.0f} %) : méfie-toi des faux calmes.")
         sk = opt.get("skew_put_call")
         if sk is not None:
-            if sk > 8: ph.append("Les protections contre la baisse coûtent cher : le marché a peur → les replis peuvent être violents.")
-            elif sk < -5: ph.append("Les paris sur la hausse coûtent cher : appétit haussier → ne pas courir après le prix, laisser venir les replis.")
-            else: ph.append("Peur et appétit sont équilibrés : pas de stress particulier dans les options.")
+            if sk > 8: ph.append("Protections contre la baisse chères : peur présente, replis potentiellement violents.")
+            elif sk < -5: ph.append("Paris hausse chers : appétit haussier, ne pas courir après le prix.")
+            else: ph.append("Peur et appétit équilibrés : pas de stress particulier dans les options.")
         mp = opt.get("max_pain")
-        if mp: ph.append(f"Le “max pain” ({mp:,.0f}) agit comme un aimant de fin de semaine : le prix a tendance à s'en rapprocher à l'expiration.")
+        if mp: ph.append(f"Le “max pain” ({mp:,.0f}) agit comme un aimant de fin de semaine.")
     if gex:
-        if gex.get("iv_atm"):
-            ph.append(f"IV ATM des options listées : {gex['iv_atm']:.0f} %.")
-        if gex.get("gex_regime") == "POS": ph.append("GEX positif : les market-makers amortissent les mouvements → marché stabilisé, range favorisé, casse à confirmer deux fois.")
-        elif gex.get("gex_regime") == "NEG": ph.append("GEX négatif : les market-makers amplifient les mouvements → marché nerveux, cassures accélérées mais retournements violents : stops stricts.")
+        if gex.get("gex_regime") == "POS": ph.append("GEX positif : market-makers amortisseurs → marché stabilisé, casse à confirmer deux fois.")
+        elif gex.get("gex_regime") == "NEG": ph.append("GEX négatif : market-makers amplificateurs → marché nerveux, stops stricts.")
     return " ".join(ph)
 
 def lecture_metaux(m):
@@ -303,6 +303,25 @@ def badge_classe(r):
 def fmt(v):
     return f"{v:.2f}" if v is not None else "—"
 
+# ================= PACK 1 : FEU, QUALITÉ =================
+def feu_txt(dist, actionnable):
+    if not actionnable:
+        return ""
+    if dist <= SEUIL_ZONE:
+        return "🟠 ZONE ALERTE : déclencheur proche → surveille la prochaine clôture H4"
+    return f"⚪ Surveillance : déclencheur à {dist:.1f} % (🟢 = confirmé par toi sur le graphique)"
+
+def qualite(r, gex):
+    d = r["direction"]
+    long = "LONG" in d
+    pts = [("R:R", (r.get("rr") or 0) >= 2),
+           ("RSI", r["rsi_d1"] < 75 if long else r["rsi_d1"] > 25),
+           ("GEX", bool(gex) and (gex["gex_regime"] == "POS" if long else gex["gex_regime"] == "NEG")),
+           ("TendW", r["etat_w"] == "au-dessus du nuage" if long else r["etat_w"] == "sous le nuage")]
+    s = sum(1 for _, ok in pts if ok)
+    det = " · ".join(f"{n} {'✔' if ok else '✘'}" for n, ok in pts)
+    return s, det
+
 CSS = """
 <style>
 body{font-family:-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:16px}
@@ -320,6 +339,7 @@ th,td{padding:8px 6px;border-bottom:1px solid #334155;text-align:left;font-size:
 .taille{color:#4ade80} .histo{color:#94a3b8;font-size:12px}
 .layers{background:#0f172a;padding:8px;border-radius:6px;margin:8px 0;font-size:12px;color:#cbd5e1}
 .conseil{background:#0b1220;border-left:4px solid #38bdf8;padding:10px;border-radius:8px;margin-top:10px;font-size:14px}
+.alert{background:#7f1d1d;border-left:4px solid #f87171;padding:10px;border-radius:8px;margin-top:10px;font-size:14px;color:#fecaca}
 </style>
 """
 
@@ -328,6 +348,7 @@ st.title("📊 Rapport de trading Pro")
 st.caption("Document d'analyse — pas un conseil personnalisé. Prix Yahoo (délai possible).")
 
 capital = st.sidebar.number_input("Capital simulé (€)", min_value=10.0, value=100.0, step=10.0)
+r_semaine = st.sidebar.number_input("R cumulé cette semaine (paper)", value=0.0, step=0.5)
 st.sidebar.markdown("---")
 st.sidebar.write("**Couches actives**")
 st.sidebar.write(f"GEX/DEX : {'ON' if USE_GEX_DEX else 'OFF'} | COT : {'ON' if USE_COT else 'OFF'} | Options : {'ON' if USE_OPTIONS else 'OFF'}")
@@ -343,7 +364,68 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         risque_pct = RISQUE_PAR_REGIME.get(regime_actuel, 0.5)
         positionnement = get_positionnement()
         metaux_indic = get_metaux()
+        now = pd.Timestamp.now(tz="UTC")
+        next_h4 = now.floor("4h") + pd.Timedelta("4h")
 
+        # ---------- PASSE 1 : analyse ----------
+        resultats = []
+        ACTIFS = [("BTC-USD","Bitcoin","BTC"), ("ETH-USD","Ethereum","ETH"), ("SOL-USD","Solana","SOL"),
+                  ("GC=F","Or",None), ("SI=F","Argent",None),
+                  ("^GSPC","S&P 500",None), ("^NDX","Nasdaq 100",None)]
+        for sym, nom, coin in ACTIFS:
+            r = analyser_actif(sym)
+            if r is None:
+                continue
+            gex = gex_dex.get_gex_dex(sym) if USE_GEX_DEX else None
+            cot = cot_data.get_cot(sym) if USE_COT else None
+            opt = deribit_options.get_options_deribit(sym) if USE_OPTIONS else None
+            metal = sym in METAUX
+            veto = (regime_actuel == "RISK-OFF" and "LONG" in r["direction"] and not metal)
+            actionnable = r["entree"] is not None and r["statut"] in ("PRÉFÉRÉ", "ACCEPTABLE") and not veto
+            dist = abs(r["entree"] - r["prix"]) / r["prix"] * 100 if r["entree"] else None
+            sens = "au-dessus du prix" if (r["entree"] and r["entree"] > r["prix"]) else "en dessous du prix"
+            q, qdet = (qualite(r, gex) if r["entree"] else (0, ""))
+            resultats.append(dict(sym=sym, nom=nom, coin=coin, r=r, gex=gex, cot=cot, opt=opt,
+                                  metal=metal, veto=veto, actionnable=actionnable,
+                                  dist=dist, sens=sens, q=q, qdet=qdet))
+
+        # ---------- PASSE 2 : garde-fous portefeuille ----------
+        act = [x for x in resultats if x["actionnable"]]
+        n_rej = sum(1 for x in resultats if x["r"]["statut"] == "REJETÉ")
+        crypto_longs = [x for x in act if x["coin"] in ("BTC", "ETH", "SOL") and "LONG" in x["r"]["direction"]]
+        crypto_factor = 0.5 if len(crypto_longs) >= 3 else 1.0
+        total_brut = risque_pct * len(act)
+        global_factor = min(1.0, PLAFOND_TOTAL / total_brut) if total_brut > PLAFOND_TOTAL else 1.0
+        total_adj = sum(risque_pct * (crypto_factor if (x["coin"] in ("BTC","ETH","SOL") and "LONG" in x["r"]["direction"]) else 1.0)
+                        * global_factor for x in act)
+        plus_proche = min([x for x in act if x["dist"] is not None], key=lambda x: x["dist"], default=None)
+
+        adj_html = ""
+        if crypto_factor < 1:
+            adj_html += "<p>⚠️ <b>Corrélation</b> : 3 cryptos long = 1 seul panier → tailles crypto ÷2.</p>"
+        if global_factor < 1:
+            adj_html += f"<p>⚠️ <b>Plafond 2 %</b> : risque total brut {total_brut:.1f} % → toutes tailles ×{global_factor:.2f}.</p>"
+        cb_html = ""
+        if r_semaine <= -2.0:
+            cb_html = "<div class='alert'>🛑 <b>CIRCUIT BREAKER</b> : −2 % atteint cette semaine → pause jusqu'à lundi. Le capital se protège d'abord.</div>"
+
+        nearest_html = ""
+        if plus_proche:
+            nearest_html = (f"<p>🔎 Déclencheur le plus proche : <b>{plus_proche['nom']}</b> à "
+                            f"<b>{plus_proche['dist']:.1f} %</b> ({plus_proche['sens']}) — "
+                            f"{feu_txt(plus_proche['dist'], True)}</p>")
+
+        resume_html = f"""
+        <div class='card'><div class='top'><h2>🎯 Aujourd'hui — {now.strftime('%d/%m, %H:%M UTC')}</h2></div>
+        <p><b>{len(act)}</b> signal(s) actionnable(s) | <b>{n_rej}</b> rejeté(s) | risque par trade : <b>{risque_pct} %</b> (régime {regime_actuel})</p>
+        <p>⏱ Prochaine clôture H4 : <b>{next_h4.strftime('%H:%M UTC')}</b> — les confirmations se jugent à cette clôture.</p>
+        {nearest_html}
+        <p>💼 Risque total si tout se déclenche : <b>{total_adj:.2f} %</b> (plafond {PLAFOND_TOTAL:.0f} %)</p>
+        {adj_html}{cb_html}
+        <p class='histo'>Feux : ⚪ loin · 🟠 zone (&le;{SEUIL_ZONE:.0f} %) · 🟢 confirmé par toi sur le graphique après clôture H4.</p></div>
+        """
+
+        # ---------- PASSE 3 : cartes ----------
         metaux_html = ""
         if metaux_indic:
             m = metaux_indic
@@ -355,34 +437,27 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
 
         cartes = ""
         lignes_journal = []
-        ACTIFS = [("BTC-USD","Bitcoin","BTC"), ("ETH-USD","Ethereum","ETH"), ("SOL-USD","Solana","SOL"),
-                  ("GC=F","Or",None), ("SI=F","Argent",None),
-                  ("^GSPC","S&P 500",None), ("^NDX","Nasdaq 100",None)]
-
-        for sym, nom, coin in ACTIFS:
-            r = analyser_actif(sym)
-            if r is None:
-                continue
-
-            gex = gex_dex.get_gex_dex(sym) if USE_GEX_DEX else None
-            cot = cot_data.get_cot(sym) if USE_COT else None
-            opt = deribit_options.get_options_deribit(sym) if USE_OPTIONS else None
-
-            metal = sym in METAUX
-            p = positionnement.get(coin)
-            histo = STATS.get(sym, "n/a (pas de backtest pour cet actif)")
+        for x in resultats:
+            r, gex, cot, opt = x["r"], x["gex"], x["cot"], x["opt"]
+            p = positionnement.get(x["coin"])
+            histo = STATS.get(x["sym"], "n/a (pas de backtest pour cet actif)")
             h4_txt = pd.Timestamp(r["date_h4"]).strftime("%d/%m %Hh UTC") if r.get("date_h4") is not None else "?"
 
+            facteur = 1.0
+            if x["actionnable"]:
+                if x["coin"] in ("BTC", "ETH", "SOL") and "LONG" in r["direction"]:
+                    facteur *= crypto_factor
+                facteur *= global_factor
             taille_html = ""
             risque_e = taille_e = unites = None
-            veto = (regime_actuel == "RISK-OFF" and "LONG" in r["direction"] and not metal)
-            if r["entree"] is not None and r["statut"] in ("PRÉFÉRÉ", "ACCEPTABLE") and not veto:
-                risque_e = capital * risque_pct / 100
-                dist = abs(r["entree"] - r["stop"]) / r["entree"] * 100
-                taille_e = risque_e / (dist / 100)
+            if x["actionnable"]:
+                risque_e = capital * risque_pct / 100 * facteur
+                dist_stop = abs(r["entree"] - r["stop"]) / r["entree"] * 100
+                taille_e = risque_e / (dist_stop / 100)
                 unites = taille_e / r["entree"]
+                note = f" (ajustée ×{facteur:.2f})" if facteur < 1 else ""
                 taille_html = (f"<p class='taille'>Taille : <b>{taille_e:.2f} €</b> ({unites:.6f} unité) "
-                               f"— risque {risque_e:.2f} € ({risque_pct} %)</p>")
+                               f"— risque {risque_e:.2f} €{note}</p>")
 
             tps = r["tps"]
             tp1 = fmt(tps[0][0]) if len(tps) > 0 else "—"
@@ -393,7 +468,6 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             if p is not None and p.get("funding") is not None:
                 pos_html = f"<p>Positionnement : funding {p['funding']:.4f} %/8h | OI {p['oi']/1e9:.1f} Md$</p>"
 
-            # --- Couches avancées + lecture simple ---
             lignes = []
             if USE_GEX_DEX:
                 if gex:
@@ -409,19 +483,27 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             if USE_OPTIONS:
                 if opt:
                     lignes.append(f"Options Deribit : IV 24h : {opt['iv_moyen_24h']:.0f} % | Skew : {fmt(opt['skew_put_call'])} | Max pain : {fmt(opt['max_pain'])} | Vol : {opt['volume_24h']:,.0f}")
-                elif sym in ("BTC-USD", "ETH-USD"):
+                elif x["sym"] in ("BTC-USD", "ETH-USD"):
                     lignes.append("<span style='color:#64748b'>Options Deribit : non disponible aujourd'hui (serveur protégé) — chiffres dans le LAB Colab hebdo</span>")
             lect = lecture_options_simple(opt, gex)
             layers_html = f"<div class='layers'>{'<br>'.join(lignes)}</div>" if lignes else ""
             if lect:
                 layers_html += f"<div class='conseil'>📖 Lecture simple : {lect}</div>"
 
+            dist_html = ""
+            if x["dist"] is not None:
+                dist_html = (f"<p class='prix'>Prix actuel : <b>{r['prix']:.2f}</b> | dernière bougie H4 : {h4_txt} | "
+                             f"🚦 {feu_txt(x['dist'], x['actionnable']) or f'déclencheur à {x[\"dist\"]:.1f} %'}</p>"
+                             f"<p class='histo'>Qualité : {x['q']}/4 — {x['qdet']}</p>")
+            else:
+                dist_html = f"<p class='prix'>Prix actuel : <b>{r['prix']:.2f}</b> | dernière bougie H4 : {h4_txt}</p>"
+
             cartes += f"""
             <div class='card'>
-              <div class='top'><h2>{nom} <span class='sym'>{sym}</span></h2>
+              <div class='top'><h2>{x['nom']} <span class='sym'>{x['sym']}</span></h2>
               <span class='badge {badge_classe(r)}'>{r['statut']}</span></div>
               <p class='verdict'>{r['direction']} — scénario {r['scenario']}</p>
-              <p class='prix'>Prix actuel : <b>{r['prix']:.2f}</b> | dernière bougie H4 : {h4_txt}</p>
+              {dist_html}
               <table><tr><th>Entrée</th><th>Stop</th><th>TP1</th><th>TP2</th><th>TP3</th></tr>
               <tr class='niveaux'><td>{fmt(r['entree'])}</td><td>{fmt(r['stop'])}</td>
               <td>{tp1}</td><td>{tp2}</td><td>{tp3}</td></tr></table>
@@ -430,15 +512,15 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
               {pos_html}
               {layers_html}
               <p class='histo'>Historique mesuré (25/08/2026) : {histo}</p>
-              <div class='conseil'>💡 {conseil_systeme(r, regime_actuel, metal, gex, cot, opt)}</div>
+              <div class='conseil'>💡 {conseil_systeme(r, regime_actuel, x['metal'], gex, cot, opt)}</div>
             </div>"""
 
             lignes_journal.append({
-                "date": pd.Timestamp.now().date(), "actif": sym,
-                "direction": r["direction"], "scenario": r["scenario"],
-                "statut": r["statut"], "prix_actuel": round(r["prix"], 2),
-                "entree": r["entree"], "stop": r["stop"],
-                "tp1": tp1, "tp2": tp2, "tp3": tp3,
+                "date": now.date(), "actif": x["sym"], "direction": r["direction"],
+                "scenario": r["scenario"], "statut": r["statut"],
+                "prix_actuel": round(r["prix"], 2), "entree": r["entree"], "stop": r["stop"],
+                "distance_pct": round(x["dist"], 2) if x["dist"] is not None else None,
+                "qualite": x["q"], "tp1": tp1, "tp2": tp2, "tp3": tp3,
                 "risque_e": risque_e, "taille_e": taille_e, "unites": unites,
                 "gex_regime": gex["gex_regime"] if gex else None,
                 "gex_source": gex["gex_source"] if gex else None,
@@ -450,12 +532,13 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             })
 
         if USE_DEBUG:
-            st.caption(f"Debug — régime {regime_actuel} | couches : GEX={USE_GEX_DEX}, COT={USE_COT}, OPT={USE_OPTIONS}")
+            st.caption(f"Debug — régime {regime_actuel} | facteurs : crypto={crypto_factor}, global={global_factor:.2f}")
 
         html = f"""<!DOCTYPE html><html lang='fr'><head><meta charset='utf-8'>{CSS}</head><body>
-        <h1>📊 Rapport de trading Pro — {pd.Timestamp.now().strftime('%d/%m/%Y')}</h1>
+        <h1>📊 Rapport de trading Pro — {now.strftime('%d/%m/%Y')}</h1>
         <div class='meta'>Régime macro : <b>{regime_actuel}</b> | Capital : {capital:.0f} € |
         Risque modulé : <b>{risque_pct} %</b> par trade | Couches : GEX/DEX, COT, Options Deribit</div>
+        {resume_html}
         {metaux_html}
         {CONCEPTS}
         {cartes}
@@ -463,7 +546,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         et sans paper trading validé. Les couches avancées informent et modulent la taille ; la technique décide.</div>
         </body></html>"""
 
-        components.html(html, height=5600, scrolling=True)
+        components.html(html, height=6000, scrolling=True)
 
         csv = pd.DataFrame(lignes_journal).to_csv(index=False).encode("utf-8")
         st.download_button("📥 Télécharger le journal CSV", csv,
