@@ -15,8 +15,8 @@ USE_DEBUG = False
 RR_MIN = 1.5
 METAUX = ["GC=F", "SI=F"]
 RISQUE_PAR_REGIME = {"RISK-ON": 1.0, "NEUTRE": 0.5, "RISK-OFF": 0.25}
-PLAFOND_TOTAL = 2.0          # % max de risque si tous les trades se déclenchent
-SEUIL_ZONE = 2.0             # % de distance = "zone alerte"
+PLAFOND_TOTAL = 2.0
+SEUIL_ZONE = 2.0
 
 STATS = {
     "BTC-USD": "NEUTRE : 50 % (IC 26-74) n=16 +0.37R — tous régimes : 58 % n=62 +0.66R",
@@ -26,7 +26,7 @@ STATS = {
     "SI=F": "tous régimes : 43.5 % (IC 33-54) n=92 +0.26R",
 }
 
-# ================= OUTILS TECHNIQUES (inchangés) =================
+# ================= OUTILS TECHNIQUES =================
 def ajouter_indicateurs(df):
     df = df.copy()
     close, high, low = df["Close"], df["High"], df["Low"]
@@ -211,7 +211,7 @@ def get_metaux():
     except Exception:
         return {}
 
-# ================= PÉDAGOGIE & LECTURE SIMPLE =================
+# ================= PÉDAGOGIE & LECTURE =================
 CONCEPTS = """
 <div class='card'><div class='top'><h2>📚 Comprendre les couches avancées (langage simple)</h2></div>
 <p><b>IV (volatilité implicite)</b> = l'agitation que le marché <i>attend</i>. Comme la météo : IV élevée = tempête attendue ; IV basse = temps calme.</p>
@@ -367,7 +367,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         now = pd.Timestamp.now(tz="UTC")
         next_h4 = now.floor("4h") + pd.Timedelta("4h")
 
-        # ---------- PASSE 1 : analyse ----------
+        # ---------- PASSE 1 ----------
         resultats = []
         ACTIFS = [("BTC-USD","Bitcoin","BTC"), ("ETH-USD","Ethereum","ETH"), ("SOL-USD","Solana","SOL"),
                   ("GC=F","Or",None), ("SI=F","Argent",None),
@@ -384,12 +384,12 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             actionnable = r["entree"] is not None and r["statut"] in ("PRÉFÉRÉ", "ACCEPTABLE") and not veto
             dist = abs(r["entree"] - r["prix"]) / r["prix"] * 100 if r["entree"] else None
             sens = "au-dessus du prix" if (r["entree"] and r["entree"] > r["prix"]) else "en dessous du prix"
-            q, qdet = (qualite(r, gex) if r["entree"] else (0, ""))
+            q, qdet = qualite(r, gex) if r["entree"] else (0, "")
             resultats.append(dict(sym=sym, nom=nom, coin=coin, r=r, gex=gex, cot=cot, opt=opt,
                                   metal=metal, veto=veto, actionnable=actionnable,
                                   dist=dist, sens=sens, q=q, qdet=qdet))
 
-        # ---------- PASSE 2 : garde-fous portefeuille ----------
+        # ---------- PASSE 2 : garde-fous ----------
         act = [x for x in resultats if x["actionnable"]]
         n_rej = sum(1 for x in resultats if x["r"]["statut"] == "REJETÉ")
         crypto_longs = [x for x in act if x["coin"] in ("BTC", "ETH", "SOL") and "LONG" in x["r"]["direction"]]
@@ -422,7 +422,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         {nearest_html}
         <p>💼 Risque total si tout se déclenche : <b>{total_adj:.2f} %</b> (plafond {PLAFOND_TOTAL:.0f} %)</p>
         {adj_html}{cb_html}
-        <p class='histo'>Feux : ⚪ loin · 🟠 zone (&le;{SEUIL_ZONE:.0f} %) · 🟢 confirmé par toi sur le graphique après clôture H4.</p></div>
+        <p class='histo'>Feux : ⚪ loin · 🟠 zone (≤{SEUIL_ZONE:.0f} %) · 🟢 confirmé par toi sur le graphique après clôture H4.</p></div>
         """
 
         # ---------- PASSE 3 : cartes ----------
@@ -490,10 +490,11 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             if lect:
                 layers_html += f"<div class='conseil'>📖 Lecture simple : {lect}</div>"
 
-            dist_html = ""
+            feu = feu_txt(x["dist"], x["actionnable"])
+            if not feu and x["dist"] is not None:
+                feu = f"déclencheur à {x['dist']:.1f} %"
             if x["dist"] is not None:
-                dist_html = (f"<p class='prix'>Prix actuel : <b>{r['prix']:.2f}</b> | dernière bougie H4 : {h4_txt} | "
-                             f"🚦 {feu_txt(x['dist'], x['actionnable']) or f'déclencheur à {x[\"dist\"]:.1f} %'}</p>"
+                dist_html = (f"<p class='prix'>Prix actuel : <b>{r['prix']:.2f}</b> | dernière bougie H4 : {h4_txt} | 🚦 {feu}</p>"
                              f"<p class='histo'>Qualité : {x['q']}/4 — {x['qdet']}</p>")
             else:
                 dist_html = f"<p class='prix'>Prix actuel : <b>{r['prix']:.2f}</b> | dernière bougie H4 : {h4_txt}</p>"
