@@ -24,8 +24,8 @@ STATS = {
     "SOL-USD": "Dow+FVG : 46 % n=351 +0.41R (backtest 2 ans)",
     "Or": "Dow+FVG : 52 % n=192 +0.59R (backtest 2 ans)",
     "Argent": "Dow+FVG : 44 % n=188 +0.32R (backtest 2 ans)",
-    "^GSPC": "Dow+FVG : 40 % n=98 +0.19R (backtest 2 ans)",
-    "^NDX": "Dow+FVG : 38 % n=103 +0.15R (backtest 2 ans)",
+    "S&P 500": "Dow+FVG : 40 % n=98 +0.19R (backtest 2 ans)",
+    "Nasdaq 100": "Dow+FVG : 38 % n=103 +0.15R (backtest 2 ans)",
 }
 
 # ================= OUTILS TECHNIQUES =================
@@ -68,27 +68,27 @@ def etat_cloud(row):
     if row["Close"] < row["CloudBot"]: return "sous le nuage"
     return "dans le nuage"
 
-# --- AUTO-ROLL COMEX : choisit le contrat actif (aligné Quantfury), bascule tout seul ---
+# --- AUTO-ROLL : contrats actifs COMEX (or/argent) + CME (E-mini ES/NQ) ---
 @st.cache_data(ttl=86400)
-def metal_symbols():
+def contrats_actifs():
     today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
-    GOLD_MONTHS = [("G",2),("J",4),("M",6),("Q",8),("V",10),("Z",12)]
-    SILVER_MONTHS = [("H",3),("K",5),("N",7),("U",9),("Z",12)]
+    COMEX_MONTHS = [("G",2),("J",4),("M",6),("Q",8),("V",10),("Z",12)]
+    CME_MONTHS = [("H",3),("M",6),("U",9),("Z",12)]
     def roll_cutoff(year, month):
         first_day = pd.Timestamp(year=year, month=month, day=1)
         prev_month_end = first_day - pd.Timedelta(days=1)
         last_bday = pd.bdate_range(end=prev_month_end, periods=1)[0]
         return last_bday - pd.offsets.BDay(5)
-    def candidates(root, months):
+    def candidates(root, months, suffix):
         out = []
-        for year in [today.year, today.year+1, today.year+2]:
+        for year in [today.year, today.year+1]:
             for code, month in months:
                 if today < roll_cutoff(year, month):
-                    out.append(f"{root}{code}{str(year)[-2:]}.CMX")
+                    out.append(f"{root}{code}{str(year)[-2:]}{suffix}")
         return out[:6]
-    def choose(root, months, fallback):
+    def choose(root, months, suffix, fallback):
         best = None
-        for tk in candidates(root, months):
+        for tk in candidates(root, months, suffix):
             try:
                 hist = yf.Ticker(tk).history(interval="1d", period="10d").dropna()
                 if hist.empty: continue
@@ -102,7 +102,11 @@ def metal_symbols():
             except Exception:
                 continue
         return best[1] if best else fallback
-    return choose("GC", GOLD_MONTHS, "GC=F"), choose("SI", SILVER_MONTHS, "SI=F")
+    gc = choose("GC", COMEX_MONTHS, ".CMX", "GC=F")
+    si = choose("SI", COMEX_MONTHS, ".CMX", "SI=F")
+    es = choose("ES", CME_MONTHS, ".CME", "ES=F")
+    nq = choose("NQ", CME_MONTHS, ".CME", "NQ=F")
+    return gc, si, es, nq
 
 # --- Structure de Dow (sans fuite de futur) ---
 def tendance_dow(df, k=5):
@@ -274,7 +278,7 @@ def get_positionnement():
 @st.cache_data(ttl=900)
 def get_metaux():
     try:
-        gc_sym, si_sym = metal_symbols()
+        gc_sym, si_sym, _, _ = contrats_actifs()
         g = yf.Ticker(gc_sym).history(interval="1d", period="1y")["Close"]
         s = yf.Ticker(si_sym).history(interval="1d", period="1y")["Close"]
         if g.index.tz is not None: g.index = g.index.tz_localize(None)
@@ -293,7 +297,8 @@ CONCEPTS = """
 <p><b>FVG (Fair Value Gap)</b> = zone de déséquilibre sur 3 bougies ; le prix y revient souvent → zone d'entrée privilégiée.</p>
 <p><b>Casse H4</b> = confirmation par clôture au-delà du plus haut/bas récent.</p>
 <p><b>IV (volatilité implicite)</b> = l'agitation attendue (météo du marché). <b>Skew</b> = le prix de la peur. <b>Max pain</b> = aimant de fin de semaine.</p>
-<p><b>GEX</b> = le sens des amortisseurs (POS = marché stabilisé ; NEG = marché nerveux). <b>COT</b> = positionnement des “gros”.</p>
+<p><b>GEX</b> = le sens des amortisseurs (POS = marché stabilisé ; NEG = marché nerveux).</p>
+<p><b>COT</b> = positionnement des “gros”. Un percentile extrême = foule pleine d'un côté → risque de retournement.</p>
 <p class='histo'>Règle d'or : ces couches <b>informent et modulent la taille</b> ; elles ne déclenchent jamais un trade. La structure + la cassure décident.</p></div>
 """
 
@@ -444,10 +449,10 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         next_h4 = now.floor("4h") + pd.Timedelta("4h")
 
         resultats = []
-        GC_SYM, SI_SYM = metal_symbols()
+        GC_SYM, SI_SYM, ES_SYM, NQ_SYM = contrats_actifs()
         ACTIFS = [("BTC-USD","Bitcoin","BTC"), ("ETH-USD","Ethereum","ETH"), ("SOL-USD","Solana","SOL"),
                   (GC_SYM,"Or",None), (SI_SYM,"Argent",None),
-                  ("^GSPC","S&P 500",None), ("^NDX","Nasdaq 100",None)]
+                  (ES_SYM,"S&P 500",None), (NQ_SYM,"Nasdaq 100",None)]
         for sym, nom, coin in ACTIFS:
             r = analyser_actif(sym)
             if r is None:
@@ -605,7 +610,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             })
 
         if USE_DEBUG:
-            st.caption(f"Debug — régime {regime_actuel} | facteurs : crypto={crypto_factor}, global={global_factor:.2f} | métaux : {GC_SYM} / {SI_SYM}")
+            st.caption(f"Debug — régime {regime_actuel} | contrats : {GC_SYM} {SI_SYM} {ES_SYM} {NQ_SYM}")
 
         html = f"""<!DOCTYPE html><html lang='fr'><head><meta charset='utf-8'>{CSS}</head><body>
         <h1>📊 Rapport de trading Pro — {now.strftime('%d/%m/%Y')}</h1>
@@ -624,25 +629,26 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         csv = pd.DataFrame(lignes_journal).to_csv(index=False).encode("utf-8")
         st.download_button("📥 Télécharger le journal CSV", csv,
                            file_name="journal_signaux.csv", mime="text/csv")
-else:
-    st.info("Clique sur « Générer l'analyse du jour » pour produire le rapport complet.")
 
 # ================= GRAPHIQUES (TradingView) =================
 st.markdown("## 📈 Graphiques (H4 — unité de temps de la stratégie)")
 TV_SYMBOL = {"BTC-USD": "BINANCE:BTCUSDT", "ETH-USD": "BINANCE:ETHUSDT", "SOL-USD": "BINANCE:SOLUSDT",
-             "GC=F": "TVC:GOLD", "SI=F": "TVC:SILVER", "^GSPC": "SP:SPX", "^NDX": "TVC:NDX"}
+             "GC=F": "TVC:GOLD", "SI=F": "TVC:SILVER", "^GSPC": "OANDA:SPX500", "^NDX": "OANDA:NAS100"}
 actif_chart = st.selectbox("Actif à afficher", list(TV_SYMBOL.keys()))
+tv_id = "tv_" + actif_chart.replace("^", "").replace("=", "")
 components.html(f"""
 <div class="tradingview-widget-container" style="height:480px;">
-  <div id="tv_chart" style="height:480px;"></div>
+  <div id="{tv_id}" style="height:480px;"></div>
   <script src="https://s3.tradingview.com/tv.js"></script>
   <script>
   new TradingView.widget({{
     "autosize": false, "width": "100%", "height": 480,
     "symbol": "{TV_SYMBOL[actif_chart]}", "interval": "240", "timezone": "Etc/UTC",
     "theme": "dark", "style": "1", "locale": "fr",
-    "container_id": "tv_chart"
+    "container_id": "{tv_id}"
   }});
   </script>
 </div>""", height=500)
 st.caption("Rappel : le graphique sert à visualiser ; la décision vient du rapport (niveaux, feux, qualité).")
+else:
+    st.info("Clique sur « Générer l'analyse du jour » pour produire le rapport complet.")
