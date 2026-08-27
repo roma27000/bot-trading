@@ -19,11 +19,13 @@ PLAFOND_TOTAL = 2.0
 SEUIL_ZONE = 2.0
 
 STATS = {
-    "BTC-USD": "NEUTRE : 50 % (IC 26-74) n=16 +0.37R — tous régimes : 58 % n=62 +0.66R",
-    "ETH-USD": "NEUTRE : 36 % (IC 11-61) n=14 +0.06R — tous régimes : 48 % n=27 +0.44R",
-    "SOL-USD": "NEUTRE : 38 % (IC 4-71) n=8 +0.12R — tous régimes : 53 % n=19 +0.57R",
-    "GC=F": "tous régimes : 51.7 % (IC 43-61) n=120 +0.46R (robuste dans les 3 régimes)",
-    "SI=F": "tous régimes : 43.5 % (IC 33-54) n=92 +0.26R",
+    "BTC-USD": "Dow+FVG : 44 % n=350 +0.33R (backtest 2 ans)",
+    "ETH-USD": "Dow+FVG : 50 % n=304 +0.52R (backtest 2 ans)",
+    "SOL-USD": "Dow+FVG : 46 % n=351 +0.41R (backtest 2 ans)",
+    "GC=F": "Dow+FVG : 52 % n=192 +0.59R (backtest 2 ans)",
+    "SI=F": "Dow+FVG : 44 % n=188 +0.32R (backtest 2 ans)",
+    "^GSPC": "Dow+FVG : 40 % n=98 +0.19R (backtest 2 ans)",
+    "^NDX": "Dow+FVG : 38 % n=103 +0.15R (backtest 2 ans)",
 }
 
 # ================= OUTILS TECHNIQUES =================
@@ -66,63 +68,99 @@ def etat_cloud(row):
     if row["Close"] < row["CloudBot"]: return "sous le nuage"
     return "dans le nuage"
 
+# --- Structure de Dow (sans fuite de futur) ---
+def tendance_dow(df, k=5):
+    h, l = df["High"].values, df["Low"].values
+    n = len(df); ev = []
+    for i in range(k, n-k):
+        if h[i] >= h[i-k:i].max() and h[i] >= h[i+1:i+k+1].max(): ev.append((i+k, "H", h[i]))
+        if l[i] <= l[i-k:i].min() and l[i] <= l[i+1:i+k+1].min(): ev.append((i+k, "L", l[i]))
+    ev.sort(key=lambda x: x[0])
+    trend = {}; sh = []; sl = []; e = 0
+    idx = df.index
+    for j in range(n):
+        while e < len(ev) and ev[e][0] <= j:
+            (sh if ev[e][1] == "H" else sl).append(ev[e][2]); e += 1
+        t = 0
+        if len(sh) >= 2 and len(sl) >= 2:
+            hh, hl = sh[-1] > sh[-2], sl[-1] > sl[-2]
+            lh, ll = sh[-1] < sh[-2], sl[-1] < sl[-2]
+            if hh and hl: t = 1
+            elif lh and ll: t = -1
+        trend[idx[j]] = t
+    return trend
+
+# --- Fair Value Gaps ---
+def fvg_zones(df):
+    h, l = df["High"].values, df["Low"].values
+    z = []
+    for i in range(2, len(df)):
+        if l[i] > h[i-2]: z.append((i, "B", l[i], h[i-2]))
+        elif h[i] < l[i-2]: z.append((i, "S", l[i-2], h[i]))
+    return z
+
 def _analyser(symbole):
     try:
         t = yf.Ticker(symbole)
         h1 = t.history(interval="1h", period="1y")
         if h1.empty: return None
         h4 = resample_4h(h1)
-        d1 = t.history(interval="1d", period="2y")
+        d1 = t.history(interval="1d", period="5y")
         w1 = t.history(interval="1wk", period="5y")
         if min(len(h4), len(d1), len(w1)) < 210: return None
-        H4 = ajouter_indicateurs(h4).iloc[-1]
-        D1 = ajouter_indicateurs(d1).iloc[-1]
-        W1 = ajouter_indicateurs(w1).iloc[-1]
-        def bc(r):
-            if r["Close"] > r["CloudTop"]: return 1
-            if r["Close"] < r["CloudBot"]: return -1
-            return 0
-        score = 2*bc(W1) + 2*bc(D1) + bc(H4)
-        if score >= 3: direction = "LONG"
-        elif score >= 1: direction = "LONG SWING"
-        elif score <= -3: direction = "SHORT"
-        elif score <= -1: direction = "SHORT SWING"
-        else: direction = "ATTENTE"
+        H4 = ajouter_indicateurs(h4)
+        D1 = ajouter_indicateurs(d1)
+        W1 = ajouter_indicateurs(w1)
+        r4, rd1, rw1 = H4.iloc[-1], D1.iloc[-1], W1.iloc[-1]
+        td = tendance_dow(D1, k=5).get(D1.index[-1], 0)
+        i = len(H4) - 1
+        atr = r4["ATR"]
+        direction = "LONG" if td == 1 else ("SHORT" if td == -1 else "ATTENTE")
         alerte = ""
-        if "LONG" in direction and D1["RSI"] > 75: alerte = "RSI D1 sur-étiré"
-        if "SHORT" in direction and D1["RSI"] < 25: alerte = "RSI D1 sur-étiré"
-        res = []
-        if "LONG" in direction:
-            scen = [("PULLBACK", float(H4["Kijun"]),
-                     min(float(H4["CloudBot"]), float(H4["LL20"])) - float(H4["ATR"]),
-                     [float(H4["HH20"]), float(D1["HH20"]), float(W1["CloudBot"])]),
-                    ("CASSE", float(H4["HH20"]), float(H4["HH20"]) - 2*float(H4["ATR"]),
-                     [float(D1["HH20"]), float(W1["CloudBot"]), float(W1["CloudTop"])])]
-            for ns, e, s, tg in scen:
-                rk = e - s
-                if rk <= 0: continue
-                tps = [(tp, (tp-e)/rk) for tp in tg if tp > e]
-                if tps: res.append((ns, e, s, max(x[1] for x in tps), tps))
-        elif "SHORT" in direction:
-            scen = [("PULLBACK", float(H4["Kijun"]),
-                     max(float(H4["CloudTop"]), float(H4["HH20"])) + float(H4["ATR"]),
-                     [float(H4["LL20"]), float(D1["LL20"]), float(W1["CloudTop"])]),
-                    ("CASSE", float(H4["LL20"]), float(H4["LL20"]) + 2*float(H4["ATR"]),
-                     [float(D1["LL20"]), float(W1["CloudTop"]), float(W1["CloudBot"])])]
-            for ns, e, s, tg in scen:
-                rk = s - e
-                if rk <= 0: continue
-                tps = [(tp, (e-tp)/rk) for tp in tg if tp < e]
-                if tps: res.append((ns, e, s, max(x[1] for x in tps), tps))
-        base = {"prix": float(H4["Close"]), "atr": float(H4["ATR"]), "score": score,
-                "direction": direction, "alerte": alerte, "rsi_d1": float(D1["RSI"]),
-                "etat_w": etat_cloud(W1), "etat_d": etat_cloud(D1), "etat_h4": etat_cloud(H4),
+        if direction == "LONG" and rd1["RSI"] > 75: alerte = "RSI D1 sur-étiré"
+        if direction == "SHORT" and rd1["RSI"] < 25: alerte = "RSI D1 sur-étiré"
+        cands = []
+        if td == 1:
+            lvl = H4["High"].rolling(20).max().shift(1).iloc[i]
+            if r4["Close"] > lvl: cands.append(("CASSE", r4["Close"], lvl - 2*atr))
+            for (zf, ty, top, bot) in fvg_zones(H4):
+                if ty != "B" or zf > i or zf < i-40: continue
+                if (H4["Close"].iloc[zf:i] < bot).any(): continue
+                if r4["Low"] <= top: cands.append(("FVG", top, bot - 0.5*atr))
+        elif td == -1:
+            lvl = H4["Low"].rolling(20).min().shift(1).iloc[i]
+            if r4["Close"] < lvl: cands.append(("CASSE", r4["Close"], lvl + 2*atr))
+            for (zf, ty, top, bot) in fvg_zones(H4):
+                if ty != "S" or zf > i or zf < i-40: continue
+                if (H4["Close"].iloc[zf:i] > top).any(): continue
+                if r4["High"] >= bot: cands.append(("FVG", bot, top + 0.5*atr))
+        base = {"prix": float(r4["Close"]), "atr": float(atr), "score": td,
+                "direction": direction, "alerte": alerte, "rsi_d1": float(rd1["RSI"]),
+                "etat_w": etat_cloud(rw1), "etat_d": etat_cloud(rd1), "etat_h4": etat_cloud(r4),
                 "date_h4": h4.index[-1]}
-        if direction == "ATTENTE" or not res:
+        if direction == "ATTENTE" or not cands:
             base.update({"scenario": "-", "entree": None, "stop": None, "rr": None, "tps": [],
                          "statut": "ATTENTE" if direction == "ATTENTE" else "REJETÉ"})
             return base
-        ns, e, s, rr, tps = max(res, key=lambda x: x[3])
+        best = None
+        for (ns, e, s) in cands:
+            risk = abs(e - s)
+            if risk <= 0: continue
+            if td == 1:
+                tp1 = float(rd1["HH20"])
+                if tp1 <= e: continue
+                rr = (tp1 - e) / risk
+                tps = [(tp1, rr), (e + 2*risk, 2.0)]
+            else:
+                tp1 = float(rd1["LL20"])
+                if tp1 >= e: continue
+                rr = (e - tp1) / risk
+                tps = [(tp1, rr), (e - 2*risk, 2.0)]
+            if best is None or rr > best[3]: best = (ns, e, s, rr, tps)
+        if not best:
+            base.update({"scenario": "-", "entree": None, "stop": None, "rr": None, "tps": [], "statut": "REJETÉ"})
+            return base
+        ns, e, s, rr, tps = best
         stt = "PRÉFÉRÉ" if rr >= 2 else ("ACCEPTABLE" if rr >= RR_MIN else "REJETÉ")
         base.update({"scenario": ns, "entree": e, "stop": s, "rr": rr, "tps": tps, "statut": stt})
         return base
@@ -213,14 +251,13 @@ def get_metaux():
 
 # ================= PÉDAGOGIE & LECTURE =================
 CONCEPTS = """
-<div class='card'><div class='top'><h2>📚 Comprendre les couches avancées (langage simple)</h2></div>
-<p><b>IV (volatilité implicite)</b> = l'agitation que le marché <i>attend</i>. Comme la météo : IV élevée = tempête attendue ; IV basse = temps calme.</p>
-<p><b>Skew put/call</b> = le prix de la peur. Si les “puts” (protections contre la baisse) sont plus chers que les “calls” (paris hausse), le marché se protège → peur présente.</p>
-<p><b>Max pain</b> = le prix où les acheteurs d'options perdent le plus à l'expiration ; souvent un “aimant” en fin de semaine.</p>
-<p><b>GEX</b> = le sens des amortisseurs. GEX positif = les gros acteurs calmant le jeu (marché stable, cassures moins fiables) ; GEX négatif = ils amplifient (marché nerveux).</p>
-<p><b>DEX</b> = le biais directionnel du positionnement options (haussier / baissier / neutre).</p>
-<p><b>COT</b> = le positionnement des “gros” (spéculateurs vs professionnels). Un percentile extrême = foule déjà pleine d'un côté → risque de retournement.</p>
-<p class='histo'>Règle d'or : ces couches <b>informent et modulent la taille</b> ; elles ne déclenchent jamais un trade. La technique (tendance + cassure + R:R) décide.</p></div>
+<div class='card'><div class='top'><h2>📚 Comprendre le système (langage simple)</h2></div>
+<p><b>Structure de Dow</b> = la boussole. Tendance haussière = sommets et creux ascendants (HH/HL) ; on ne trade que dans le sens de la structure Daily.</p>
+<p><b>FVG (Fair Value Gap)</b> = zone de déséquilibre sur 3 bougies ; le prix y revient souvent → zone d'entrée privilégiée.</p>
+<p><b>Casse H4</b> = confirmation par clôture au-delà du plus haut/bas récent.</p>
+<p><b>IV (volatilité implicite)</b> = l'agitation attendue (météo du marché). <b>Skew</b> = le prix de la peur. <b>Max pain</b> = aimant de fin de semaine.</p>
+<p><b>GEX</b> = le sens des amortisseurs (POS = marché stabilisé ; NEG = marché nerveux). <b>COT</b> = positionnement des “gros”.</p>
+<p class='histo'>Règle d'or : ces couches <b>informent et modulent la taille</b> ; elles ne déclenchent jamais un trade. La structure + la cassure décident.</p></div>
 """
 
 def lecture_options_simple(opt, gex):
@@ -260,21 +297,24 @@ def lecture_metaux(m):
 
 def conseil_systeme(r, reg, metal, gex=None, cot=None, opt=None):
     d = r["direction"]
-    if d == "ATTENTE": return "Aucune action. Pas de biais clair : le système attend."
+    if d == "ATTENTE": return "Aucune action. Pas de structure Daily claire : le système attend."
     if r["statut"] == "REJETÉ": return "Aucune action. R:R insuffisant : le système protège ton capital."
     if reg == "RISK-OFF" and "LONG" in d and not metal:
         return "VETO MACRO : pas de position longue risquée dans ce régime (métaux exceptés)."
     if reg == "RISK-ON" and "SHORT" in d: return "VETO MACRO : pas de position courte dans ce régime."
     t = []
     if r["scenario"] == "CASSE":
-        sens = "au-dessus" if "LONG" in d else "en dessous"
-        t.append(f"Attendre une clôture H4 {sens} de <b>{r['entree']:.2f}</b> avant d'entrer.")
-    else:
-        t.append(f"Attendre un repli vers <b>{r['entree']:.2f}</b> pour envisager une entrée.")
+        if ("LONG" in d and r["prix"] > r["entree"]) or ("SHORT" in d and r["prix"] < r["entree"]):
+            t.append(f"Cassure confirmée à la dernière clôture H4 : entrée au marché vers <b>{r['prix']:.2f}</b>.")
+        else:
+            sens = "au-dessus" if "LONG" in d else "en dessous"
+            t.append(f"Attendre une clôture H4 {sens} de <b>{r['entree']:.2f}</b> avant d'entrer.")
+    elif r["scenario"] == "FVG":
+        t.append(f"Attendre un repli dans la zone FVG : entrée limite à <b>{r['entree']:.2f}</b>.")
     t.append(f"Stop loss obligatoire à <b>{r['stop']:.2f}</b>, jamais élargi.")
     if r["alerte"] or "SWING" in d:
         t.append("Contexte fragile : <b>taille réduite</b>, ne pas courir après le prix.")
-    t.append("Sorties par tiers (TP1/TP2/TP3) ; après TP1, remonter le stop au prix d'entrée.")
+    t.append("Sorties par tiers (TP1/TP2) ; après TP1, remonter le stop au prix d'entrée.")
     bonus = []
     if gex:
         if gex["gex_regime"] == "POS" and "LONG" in d:
@@ -303,7 +343,6 @@ def badge_classe(r):
 def fmt(v):
     return f"{v:.2f}" if v is not None else "—"
 
-# ================= PACK 1 : FEU, QUALITÉ =================
 def feu_txt(dist, actionnable):
     if not actionnable:
         return ""
@@ -367,7 +406,6 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         now = pd.Timestamp.now(tz="UTC")
         next_h4 = now.floor("4h") + pd.Timedelta("4h")
 
-        # ---------- PASSE 1 ----------
         resultats = []
         ACTIFS = [("BTC-USD","Bitcoin","BTC"), ("ETH-USD","Ethereum","ETH"), ("SOL-USD","Solana","SOL"),
                   ("GC=F","Or",None), ("SI=F","Argent",None),
@@ -383,13 +421,11 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             veto = (regime_actuel == "RISK-OFF" and "LONG" in r["direction"] and not metal)
             actionnable = r["entree"] is not None and r["statut"] in ("PRÉFÉRÉ", "ACCEPTABLE") and not veto
             dist = abs(r["entree"] - r["prix"]) / r["prix"] * 100 if r["entree"] else None
-            sens = "au-dessus du prix" if (r["entree"] and r["entree"] > r["prix"]) else "en dessous du prix"
-            q, qdet = qualite(r, gex) if r["entree"] else (0, "")
+            q, qdet = (qualite(r, gex) if r["entree"] else (0, ""))
             resultats.append(dict(sym=sym, nom=nom, coin=coin, r=r, gex=gex, cot=cot, opt=opt,
                                   metal=metal, veto=veto, actionnable=actionnable,
-                                  dist=dist, sens=sens, q=q, qdet=qdet))
+                                  dist=dist, q=q, qdet=qdet))
 
-        # ---------- PASSE 2 : garde-fous ----------
         act = [x for x in resultats if x["actionnable"]]
         n_rej = sum(1 for x in resultats if x["r"]["statut"] == "REJETÉ")
         crypto_longs = [x for x in act if x["coin"] in ("BTC", "ETH", "SOL") and "LONG" in x["r"]["direction"]]
@@ -412,8 +448,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         nearest_html = ""
         if plus_proche:
             nearest_html = (f"<p>🔎 Déclencheur le plus proche : <b>{plus_proche['nom']}</b> à "
-                            f"<b>{plus_proche['dist']:.1f} %</b> ({plus_proche['sens']}) — "
-                            f"{feu_txt(plus_proche['dist'], True)}</p>")
+                            f"<b>{plus_proche['dist']:.1f} %</b> — {feu_txt(plus_proche['dist'], True)}</p>")
 
         resume_html = f"""
         <div class='card'><div class='top'><h2>🎯 Aujourd'hui — {now.strftime('%d/%m, %H:%M UTC')}</h2></div>
@@ -425,7 +460,6 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         <p class='histo'>Feux : ⚪ loin · 🟠 zone (≤{SEUIL_ZONE:.0f} %) · 🟢 confirmé par toi sur le graphique après clôture H4.</p></div>
         """
 
-        # ---------- PASSE 3 : cartes ----------
         metaux_html = ""
         if metaux_indic:
             m = metaux_indic
@@ -512,7 +546,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
               <p>Macro : régime <b>{regime_actuel}</b> | RSI D1 : {r['rsi_d1']:.1f} | Ichimoku W : {r['etat_w']}</p>
               {pos_html}
               {layers_html}
-              <p class='histo'>Historique mesuré (25/08/2026) : {histo}</p>
+              <p class='histo'>Historique mesuré (27/08/2026) : {histo}</p>
               <div class='conseil'>💡 {conseil_systeme(r, regime_actuel, x['metal'], gex, cot, opt)}</div>
             </div>"""
 
@@ -538,13 +572,13 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         html = f"""<!DOCTYPE html><html lang='fr'><head><meta charset='utf-8'>{CSS}</head><body>
         <h1>📊 Rapport de trading Pro — {now.strftime('%d/%m/%Y')}</h1>
         <div class='meta'>Régime macro : <b>{regime_actuel}</b> | Capital : {capital:.0f} € |
-        Risque modulé : <b>{risque_pct} %</b> par trade | Couches : GEX/DEX, COT, Options Deribit</div>
+        Risque modulé : <b>{risque_pct} %</b> par trade | Cœur : Dow Daily + FVG/Casse H4</div>
         {resume_html}
         {metaux_html}
         {CONCEPTS}
         {cartes}
         <div class='conseil'>Rappel : aucun trade réel sans confirmation du prix, sans respect du stop,
-        et sans paper trading validé. Les couches avancées informent et modulent la taille ; la technique décide.</div>
+        et sans paper trading validé. Les couches avancées informent et modulent la taille ; la structure décide.</div>
         </body></html>"""
 
         components.html(html, height=6000, scrolling=True)
@@ -554,77 +588,3 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
                            file_name="journal_signaux.csv", mime="text/csv")
 else:
     st.info("Clique sur « Générer l'analyse du jour » pour produire le rapport complet.")
-
-# ================= PACK 2 : JOURNAL DE PAPER TRADING =================
-try:
-    st.markdown("## 📒 Journal de paper trading")
-    up = st.file_uploader("Charge ton journal CSV précédent (pour continuer la série)", type=["csv"])
-    trades = []
-    if up is not None:
-        try:
-            trades = pd.read_csv(up).to_dict("records")
-        except Exception:
-            st.warning("CSV illisible — journal vierge.")
-
-    with st.expander("➕ Ajouter un trade simulé"):
-        with st.form("form_trade"):
-            c1, c2 = st.columns(2)
-            actif = c1.selectbox("Actif", ["BTC-USD", "ETH-USD", "SOL-USD", "GC=F", "SI=F", "^GSPC", "^NDX"])
-            direction = c2.selectbox("Sens", ["LONG", "SHORT"])
-            entree = st.number_input("Prix d'entrée", value=0.0, format="%.2f")
-            stop = st.number_input("Stop", value=0.0, format="%.2f")
-            tp = st.number_input("Prix de sortie (0 si encore ouvert)", value=0.0, format="%.2f")
-            issue = st.selectbox("Issue", ["ouvert", "stop", "sortie"])
-            note = st.text_input("Note (discipline, émotion, contexte)")
-            ok = st.form_submit_button("Ajouter au journal")
-        if ok and entree > 0 and stop > 0 and stop != entree:
-            risk = abs(entree - stop)
-            if issue == "stop":
-                r_res = -1.0
-            elif issue == "sortie" and tp > 0:
-                r_res = (tp - entree) / risk if direction == "LONG" else (entree - tp) / risk
-            else:
-                r_res = 0.0
-            trades.append({"date": str(pd.Timestamp.now().date()), "actif": actif,
-                           "direction": direction, "entree": entree, "stop": stop,
-                           "sortie": tp, "issue": issue, "R": round(r_res, 2), "note": note})
-
-    if trades:
-        dfj = pd.DataFrame(trades)
-        clos = dfj[dfj["issue"].isin(["stop", "sortie"])]
-        wr = (clos["R"] > 0).mean() * 100 if len(clos) else 0.0
-        cum = float(clos["R"].sum()) if len(clos) else 0.0
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Trades (total)", len(dfj))
-        m2.metric("Win rate (clos)", f"{wr:.0f} %")
-        m3.metric("R cumulé", f"{cum:+.2f}")
-        if cum <= -2.0:
-            st.error("🛑 CIRCUIT BREAKER : −2 R atteint → pause jusqu'à lundi. Le capital d'abord.")
-        st.dataframe(dfj, use_container_width=True)
-        st.download_button("💾 Télécharger le journal mis à jour",
-                           dfj.to_csv(index=False).encode("utf-8"),
-                           file_name="journal_paper_trading.csv", mime="text/csv")
-    else:
-        st.info("Aucun trade enregistré pour l'instant. Ajoute ton premier trade simulé quand un signal est confirmé.")
-except Exception as e:
-    st.warning(f"Section journal indisponible : {e}")
-
-# ================= PACK 3 : GRAPHIQUES (TradingView) =================
-st.markdown("## 📈 Graphiques (H4 — unité de temps de la stratégie)")
-TV_SYMBOL = {"BTC-USD": "BINANCE:BTCUSDT", "ETH-USD": "BINANCE:ETHUSDT", "SOL-USD": "BINANCE:SOLUSDT",
-             "GC=F": "TVC:GOLD", "SI=F": "TVC:SILVER", "^GSPC": "SP:SPX", "^NDX": "TVC:NDX"}
-actif_chart = st.selectbox("Actif à afficher", list(TV_SYMBOL.keys()))
-components.html(f"""
-<div class="tradingview-widget-container" style="height:480px;">
-  <div id="tv_chart" style="height:480px;"></div>
-  <script src="https://s3.tradingview.com/tv.js"></script>
-  <script>
-  new TradingView.widget({{
-    "autosize": false, "width": "100%", "height": 480,
-    "symbol": "{TV_SYMBOL[actif_chart]}", "interval": "240", "timezone": "Etc/UTC",
-    "theme": "dark", "style": "1", "locale": "fr",
-    "container_id": "tv_chart"
-  }});
-  </script>
-</div>""", height=500)
-st.caption("Rappel : le graphique sert à visualiser ; la décision vient du rapport (niveaux, feux, qualité).")
