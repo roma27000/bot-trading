@@ -632,10 +632,10 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
 else:
     st.info("Clique sur « Générer l'analyse du jour » pour produire le rapport complet.")
 
-# ================= GRAPHIQUES (TradingView) — hors bouton, toujours visibles =================
+# ================= GRAPHIQUES (TradingView) — CORrigés : SPY/QQQ =================
 st.markdown("## 📈 Graphiques (H4 — unité de temps de la stratégie)")
 TV_SYMBOL = {"BTC-USD": "BINANCE:BTCUSDT", "ETH-USD": "BINANCE:ETHUSDT", "SOL-USD": "BINANCE:SOLUSDT",
-             "GC=F": "TVC:GOLD", "SI=F": "TVC:SILVER", "^GSPC": "OANDA:SPX500", "^NDX": "OANDA:NAS100"}
+             "GC=F": "TVC:GOLD", "SI=F": "TVC:SILVER", "^GSPC": "AMEX:SPY", "^NDX": "NASDAQ:QQQ"}
 actif_chart = st.selectbox("Actif à afficher", list(TV_SYMBOL.keys()))
 tv_id = "tv_" + actif_chart.replace("^", "").replace("=", "")
 components.html(f"""
