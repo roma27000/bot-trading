@@ -629,8 +629,10 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         csv = pd.DataFrame(lignes_journal).to_csv(index=False).encode("utf-8")
         st.download_button("📥 Télécharger le journal CSV", csv,
                            file_name="journal_signaux.csv", mime="text/csv")
+else:
+    st.info("Clique sur « Générer l'analyse du jour » pour produire le rapport complet.")
 
-# ================= GRAPHIQUES (TradingView) =================
+# ================= GRAPHIQUES (TradingView) — hors bouton, toujours visibles =================
 st.markdown("## 📈 Graphiques (H4 — unité de temps de la stratégie)")
 TV_SYMBOL = {"BTC-USD": "BINANCE:BTCUSDT", "ETH-USD": "BINANCE:ETHUSDT", "SOL-USD": "BINANCE:SOLUSDT",
              "GC=F": "TVC:GOLD", "SI=F": "TVC:SILVER", "^GSPC": "OANDA:SPX500", "^NDX": "OANDA:NAS100"}
@@ -650,5 +652,3 @@ components.html(f"""
   </script>
 </div>""", height=500)
 st.caption("Rappel : le graphique sert à visualiser ; la décision vient du rapport (niveaux, feux, qualité).")
-else:
-    st.info("Clique sur « Générer l'analyse du jour » pour produire le rapport complet.")
