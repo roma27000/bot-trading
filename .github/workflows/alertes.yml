@@ -1,0 +1,18 @@
+name: alertes-trading
+on:
+  schedule:
+    - cron: "5 0,4,8,12,16,20 * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Dépendances
+        run: pip install yfinance pandas requests
+      - name: Vérification des cassures
+        run: python alerts.py
