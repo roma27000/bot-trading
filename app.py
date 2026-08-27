@@ -13,7 +13,7 @@ USE_COT = True
 USE_OPTIONS = True
 USE_DEBUG = False
 RR_MIN = 1.5
-METAUX = ["GC=F", "SI=F"]
+METAUX = ["Or", "Argent"]
 RISQUE_PAR_REGIME = {"RISK-ON": 1.0, "NEUTRE": 0.5, "RISK-OFF": 0.25}
 PLAFOND_TOTAL = 2.0
 SEUIL_ZONE = 2.0
@@ -22,8 +22,8 @@ STATS = {
     "BTC-USD": "Dow+FVG : 44 % n=350 +0.33R (backtest 2 ans)",
     "ETH-USD": "Dow+FVG : 50 % n=304 +0.52R (backtest 2 ans)",
     "SOL-USD": "Dow+FVG : 46 % n=351 +0.41R (backtest 2 ans)",
-    "GC=F": "Dow+FVG : 52 % n=192 +0.59R (backtest 2 ans)",
-    "SI=F": "Dow+FVG : 44 % n=188 +0.32R (backtest 2 ans)",
+    "Or": "Dow+FVG : 52 % n=192 +0.59R (backtest 2 ans)",
+    "Argent": "Dow+FVG : 44 % n=188 +0.32R (backtest 2 ans)",
     "^GSPC": "Dow+FVG : 40 % n=98 +0.19R (backtest 2 ans)",
     "^NDX": "Dow+FVG : 38 % n=103 +0.15R (backtest 2 ans)",
 }
@@ -67,6 +67,42 @@ def etat_cloud(row):
     if row["Close"] > row["CloudTop"]: return "au-dessus du nuage"
     if row["Close"] < row["CloudBot"]: return "sous le nuage"
     return "dans le nuage"
+
+# --- AUTO-ROLL COMEX : choisit le contrat actif (aligné Quantfury), bascule tout seul ---
+@st.cache_data(ttl=86400)
+def metal_symbols():
+    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    GOLD_MONTHS = [("G",2),("J",4),("M",6),("Q",8),("V",10),("Z",12)]
+    SILVER_MONTHS = [("H",3),("K",5),("N",7),("U",9),("Z",12)]
+    def roll_cutoff(year, month):
+        first_day = pd.Timestamp(year=year, month=month, day=1)
+        prev_month_end = first_day - pd.Timedelta(days=1)
+        last_bday = pd.bdate_range(end=prev_month_end, periods=1)[0]
+        return last_bday - pd.offsets.BDay(5)
+    def candidates(root, months):
+        out = []
+        for year in [today.year, today.year+1, today.year+2]:
+            for code, month in months:
+                if today < roll_cutoff(year, month):
+                    out.append(f"{root}{code}{str(year)[-2:]}.CMX")
+        return out[:6]
+    def choose(root, months, fallback):
+        best = None
+        for tk in candidates(root, months):
+            try:
+                hist = yf.Ticker(tk).history(interval="1d", period="10d").dropna()
+                if hist.empty: continue
+                last_date = hist.index[-1]
+                if getattr(last_date, "tzinfo", None) is not None:
+                    last_date = last_date.tz_localize(None)
+                if (today - last_date.normalize()).days > 5: continue
+                vol = float(hist["Volume"].tail(5).mean()) if "Volume" in hist.columns and hist["Volume"].dropna().shape[0] else 0
+                if best is None or vol > best[0]:
+                    best = (vol, tk)
+            except Exception:
+                continue
+        return best[1] if best else fallback
+    return choose("GC", GOLD_MONTHS, "GC=F"), choose("SI", SILVER_MONTHS, "SI=F")
 
 # --- Structure de Dow (sans fuite de futur) ---
 def tendance_dow(df, k=5):
@@ -238,8 +274,9 @@ def get_positionnement():
 @st.cache_data(ttl=900)
 def get_metaux():
     try:
-        g = yf.Ticker("GC=F").history(interval="1d", period="1y")["Close"]
-        s = yf.Ticker("SI=F").history(interval="1d", period="1y")["Close"]
+        gc_sym, si_sym = metal_symbols()
+        g = yf.Ticker(gc_sym).history(interval="1d", period="1y")["Close"]
+        s = yf.Ticker(si_sym).history(interval="1d", period="1y")["Close"]
         if g.index.tz is not None: g.index = g.index.tz_localize(None)
         if s.index.tz is not None: s.index = s.index.tz_localize(None)
         g_now, s_now = float(g.iloc[-1]), float(s.iloc[-1])
@@ -312,7 +349,7 @@ def conseil_systeme(r, reg, metal, gex=None, cot=None, opt=None):
     elif r["scenario"] == "FVG":
         t.append(f"Attendre un repli dans la zone FVG : entrée limite à <b>{r['entree']:.2f}</b>.")
     t.append(f"Stop loss obligatoire à <b>{r['stop']:.2f}</b>, jamais élargi.")
-    if r["alerte"] or "SWING" in d:
+    if r["alerte"]:
         t.append("Contexte fragile : <b>taille réduite</b>, ne pas courir après le prix.")
     t.append("Sorties par tiers (TP1/TP2) ; après TP1, remonter le stop au prix d'entrée.")
     bonus = []
@@ -407,8 +444,9 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         next_h4 = now.floor("4h") + pd.Timedelta("4h")
 
         resultats = []
+        GC_SYM, SI_SYM = metal_symbols()
         ACTIFS = [("BTC-USD","Bitcoin","BTC"), ("ETH-USD","Ethereum","ETH"), ("SOL-USD","Solana","SOL"),
-                  ("GC=F","Or",None), ("SI=F","Argent",None),
+                  (GC_SYM,"Or",None), (SI_SYM,"Argent",None),
                   ("^GSPC","S&P 500",None), ("^NDX","Nasdaq 100",None)]
         for sym, nom, coin in ACTIFS:
             r = analyser_actif(sym)
@@ -417,7 +455,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             gex = gex_dex.get_gex_dex(sym) if USE_GEX_DEX else None
             cot = cot_data.get_cot(sym) if USE_COT else None
             opt = deribit_options.get_options_deribit(sym) if USE_OPTIONS else None
-            metal = sym in METAUX
+            metal = nom in METAUX
             veto = (regime_actuel == "RISK-OFF" and "LONG" in r["direction"] and not metal)
             actionnable = r["entree"] is not None and r["statut"] in ("PRÉFÉRÉ", "ACCEPTABLE") and not veto
             dist = abs(r["entree"] - r["prix"]) / r["prix"] * 100 if r["entree"] else None
@@ -474,7 +512,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         for x in resultats:
             r, gex, cot, opt = x["r"], x["gex"], x["cot"], x["opt"]
             p = positionnement.get(x["coin"])
-            histo = STATS.get(x["sym"], "n/a (pas de backtest pour cet actif)")
+            histo = STATS.get(x["sym"], STATS.get(x["nom"], "n/a (pas de backtest pour cet actif)"))
             h4_txt = pd.Timestamp(r["date_h4"]).strftime("%d/%m %Hh UTC") if r.get("date_h4") is not None else "?"
 
             facteur = 1.0
@@ -496,7 +534,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             tps = r["tps"]
             tp1 = fmt(tps[0][0]) if len(tps) > 0 else "—"
             tp2 = fmt(tps[1][0]) if len(tps) > 1 else "—"
-            tp3 = fmt(tps[2][0]) if len(tps) > 2 else "—"
+            tp3 = "—"
 
             pos_html = ""
             if p is not None and p.get("funding") is not None:
@@ -567,7 +605,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             })
 
         if USE_DEBUG:
-            st.caption(f"Debug — régime {regime_actuel} | facteurs : crypto={crypto_factor}, global={global_factor:.2f}")
+            st.caption(f"Debug — régime {regime_actuel} | facteurs : crypto={crypto_factor}, global={global_factor:.2f} | métaux : {GC_SYM} / {SI_SYM}")
 
         html = f"""<!DOCTYPE html><html lang='fr'><head><meta charset='utf-8'>{CSS}</head><body>
         <h1>📊 Rapport de trading Pro — {now.strftime('%d/%m/%Y')}</h1>
