@@ -1,36 +1,72 @@
-# ===== alerts.py — sentinelle H4 via ntfy.sh (sans compte ni bot) =====
+# ===== alerts.py v2 — sentinelle H4 (Dow + cassure) via ntfy.sh =====
 import requests
 import yfinance as yf
 import pandas as pd
 
-NTFY_TOPIC = "roma-moula-k7p2x9"   # ton canal privé — ne le partage pas
+NTFY_TOPIC = "roma-moula-k7p2x9"   # ton canal privé — ne pas partager
 
+# --- AUTO-ROLL COMEX (même logique que l'app) ---
+def metal_symbols():
+    today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+    GOLD_MONTHS = [("G",2),("J",4),("M",6),("Q",8),("V",10),("Z",12)]
+    SILVER_MONTHS = [("H",3),("K",5),("N",7),("U",9),("Z",12)]
+    def roll_cutoff(year, month):
+        first_day = pd.Timestamp(year=year, month=month, day=1)
+        prev_month_end = first_day - pd.Timedelta(days=1)
+        last_bday = pd.bdate_range(end=prev_month_end, periods=1)[0]
+        return last_bday - pd.offsets.BDay(5)
+    def candidates(root, months):
+        out = []
+        for year in [today.year, today.year+1, today.year+2]:
+            for code, month in months:
+                if today < roll_cutoff(year, month):
+                    out.append(f"{root}{code}{str(year)[-2:]}.CMX")
+        return out[:6]
+    def choose(root, months, fallback):
+        best = None
+        for tk in candidates(root, months):
+            try:
+                hist = yf.Ticker(tk).history(interval="1d", period="10d").dropna()
+                if hist.empty: continue
+                last_date = hist.index[-1]
+                if getattr(last_date, "tzinfo", None) is not None:
+                    last_date = last_date.tz_localize(None)
+                if (today - last_date.normalize()).days > 5: continue
+                vol = float(hist["Volume"].tail(5).mean()) if "Volume" in hist.columns and hist["Volume"].dropna().shape[0] else 0
+                if best is None or vol > best[0]:
+                    best = (vol, tk)
+            except Exception:
+                continue
+        return best[1] if best else fallback
+    return choose("GC", GOLD_MONTHS, "GC=F"), choose("SI", SILVER_MONTHS, "SI=F")
+
+GC_SYM, SI_SYM = metal_symbols()
 ACTIFS = [("BTC-USD", "Bitcoin"), ("ETH-USD", "Ethereum"), ("SOL-USD", "Solana"),
-          ("GC=F", "Or"), ("SI=F", "Argent"), ("^GSPC", "S&P 500"), ("^NDX", "Nasdaq 100")]
+          (GC_SYM, "Or"), (SI_SYM, "Argent"), ("^GSPC", "S&P 500"), ("^NDX", "Nasdaq 100")]
 
-def indicateurs(df):
-    df = df.copy()
-    c, h, l = df["Close"], df["High"], df["Low"]
-    df["EMA200"] = c.ewm(span=200, adjust=False).mean()
-    hh9, ll9 = h.rolling(9).max(), l.rolling(9).min()
-    hh26, ll26 = h.rolling(26).max(), l.rolling(26).min()
-    hh52, ll52 = h.rolling(52).max(), l.rolling(52).min()
-    df["Tenkan"] = (hh9 + ll9) / 2
-    df["Kijun"] = (hh26 + ll26) / 2
-    sa = ((df["Tenkan"] + df["Kijun"]) / 2).shift(26)
-    sb = ((hh52 + ll52) / 2).shift(26)
-    df["CloudTop"] = pd.concat([sa, sb], axis=1).max(axis=1)
-    df["CloudBot"] = pd.concat([sa, sb], axis=1).min(axis=1)
-    df["HH20"] = h.rolling(20).max()
-    df["LL20"] = l.rolling(20).min()
-    df["ATR"] = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()],
-                          axis=1).max(axis=1).ewm(alpha=1/14, adjust=False).mean()
-    return df
+def resample_4h(h1):
+    return h1.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
 
-def bc(r):
-    if r["Close"] > r["CloudTop"]: return 1
-    if r["Close"] < r["CloudBot"]: return -1
-    return 0
+def tendance_dow(df, k=5):
+    h, l = df["High"].values, df["Low"].values
+    n = len(df); ev = []
+    for i in range(k, n-k):
+        if h[i] >= h[i-k:i].max() and h[i] >= h[i+1:i+k+1].max(): ev.append((i+k, "H", h[i]))
+        if l[i] <= l[i-k:i].min() and l[i] <= l[i+1:i+k+1].min(): ev.append((i+k, "L", l[i]))
+    ev.sort(key=lambda x: x[0])
+    trend = {}; sh = []; sl = []; e = 0
+    idx = df.index
+    for j in range(n):
+        while e < len(ev) and ev[e][0] <= j:
+            (sh if ev[e][1] == "H" else sl).append(ev[e][2]); e += 1
+        t = 0
+        if len(sh) >= 2 and len(sl) >= 2:
+            hh, hl = sh[-1] > sh[-2], sl[-1] > sl[-2]
+            lh, ll = sh[-1] < sh[-2], sl[-1] < sl[-2]
+            if hh and hl: t = 1
+            elif lh and ll: t = -1
+        trend[idx[j]] = t
+    return trend
 
 def send(msg):
     try:
@@ -44,36 +80,40 @@ for sym, nom in ACTIFS:
     try:
         t = yf.Ticker(sym)
         h1 = t.history(interval="1h", period="60d")
-        h4 = indicateurs(h1.resample("4h").agg(
-            {"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna())
-        d1 = indicateurs(t.history(interval="1d", period="2y"))
-        w1 = indicateurs(t.history(interval="1wk", period="5y"))
-        score = 2 * bc(w1.iloc[-1]) + 2 * bc(d1.iloc[-1]) + bc(h4.iloc[-1])
-        if score >= 3: direction = "LONG"
-        elif score >= 1: direction = "LONG SWING"
-        elif score <= -3: direction = "SHORT"
-        elif score <= -1: direction = "SHORT SWING"
-        else: continue
+        h4 = resample_4h(h1)
+        d1 = t.history(interval="1d", period="5y")
+        if len(h4) < 210 or len(d1) < 210:
+            continue
+        H4 = h4.copy()
+        H4["HH20"] = H4["High"].rolling(20).max()
+        H4["LL20"] = H4["Low"].rolling(20).min()
+        tr = pd.concat([H4["High"]-H4["Low"], (H4["High"]-H4["Close"].shift(1)).abs(),
+                        (H4["Low"]-H4["Close"].shift(1)).abs()], axis=1).max(axis=1)
+        H4["ATR"] = tr.ewm(alpha=1/14, adjust=False).mean()
 
-        last = h4.iloc[-1]
-        if "LONG" in direction:
-            entree = h4["HH20"].shift(1).iloc[-1]
-            casse = last["Close"] > entree
-            txt = f"clôture H4 AU-DESSUS de {entree:.2f}"
-        else:
-            entree = h4["LL20"].shift(1).iloc[-1]
-            casse = last["Close"] < entree
-            txt = f"clôture H4 EN DESSOUS de {entree:.2f}"
+        td = tendance_dow(d1, k=5).get(d1.index[-1], 0)
+        i = len(H4) - 1
+        last = H4.iloc[-1]
+        prev = H4.iloc[-2]
+        msg = None
+        if td == 1:
+            lvl = H4["HH20"].shift(1).iloc[i]
+            if last["Close"] > lvl and prev["Close"] <= lvl:
+                stop = lvl - 2*last["ATR"]
+                msg = f"{nom} : LONG confirmé (cassure H4 au-dessus de {lvl:.2f}). Stop : {stop:.2f}. Vérifie le rapport avant décision."
+        elif td == -1:
+            lvl = H4["LL20"].shift(1).iloc[i]
+            if last["Close"] < lvl and prev["Close"] >= lvl:
+                stop = lvl + 2*last["ATR"]
+                msg = f"{nom} : SHORT confirmé (cassure H4 en dessous de {lvl:.2f}). Stop : {stop:.2f}. Vérifie le rapport avant décision."
 
         ts = last.name
         if ts.tz is None:
             ts = ts.tz_localize("UTC")
         age_h = (pd.Timestamp.now(tz="UTC") - ts).total_seconds() / 3600
-
-        if casse and age_h <= 5:
-            stop = entree - 2 * last["ATR"] if "LONG" in direction else entree + 2 * last["ATR"]
-            send(f"{nom} : {direction} confirmé ({txt}). Stop : {stop:.2f}. Vérifie le rapport avant décision.")
+        if msg and age_h <= 5:
+            send(msg)
         else:
-            print(f"{nom} : pas de nouvelle cassure (clôture {last['Close']:.2f} vs niveau {entree:.2f})")
+            print(f"{nom} : pas de nouvelle cassure (clôture {last['Close']:.2f})")
     except Exception as e:
         print(f"{nom} : erreur -> {e}")
