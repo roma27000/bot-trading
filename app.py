@@ -187,15 +187,15 @@ def _analyser(symbole):
             risk = abs(e - s)
             if risk <= 0: continue
             if td == 1:
-                tp1 = float(rd1["HH20"])
-                if tp1 <= e: continue
-                rr = (tp1 - e) / risk
-                tps = [(tp1, rr), (e + 2*risk, 2.0)]
+                t_struct = float(rd1["HH20"])
+                if t_struct <= e: continue
+                tps = sorted([t_struct, e + 2*risk], key=lambda x: abs(x - e))
+                rr = (tps[0] - e) / risk
             else:
-                tp1 = float(rd1["LL20"])
-                if tp1 >= e: continue
-                rr = (e - tp1) / risk
-                tps = [(tp1, rr), (e - 2*risk, 2.0)]
+                t_struct = float(rd1["LL20"])
+                if t_struct >= e: continue
+                tps = sorted([t_struct, e - 2*risk], key=lambda x: abs(x - e))
+                rr = (e - tps[0]) / risk
             if best is None or rr > best[3]: best = (ns, e, s, rr, tps)
         if not best:
             base.update({"scenario": "-", "entree": None, "stop": None, "rr": None, "tps": [], "statut": "REJETÉ"})
@@ -296,7 +296,8 @@ CONCEPTS = """
 <p><b>Structure de Dow</b> = la boussole. Tendance haussière = sommets et creux ascendants (HH/HL) ; on ne trade que dans le sens de la structure Daily.</p>
 <p><b>FVG (Fair Value Gap)</b> = zone de déséquilibre sur 3 bougies ; le prix y revient souvent → zone d'entrée privilégiée.</p>
 <p><b>Casse H4</b> = confirmation par clôture au-delà du plus haut/bas récent.</p>
-<p><b>IV (volatilité implicite)</b> = l'agitation attendue (météo du marché). <b>Skew</b> = le prix de la peur. <b>Max pain</b> = aimant de fin de semaine.</p>
+<p><b>TP1 / TP2</b> = objectifs triés par distance : TP1 = le plus proche (première sortie), TP2 = le suivant.</p>
+<p><b>IV (volatilité implicite)</b> = l'agitation attendue. <b>Skew</b> = le prix de la peur. <b>Max pain</b> = aimant de fin de semaine.</p>
 <p><b>GEX</b> = le sens des amortisseurs (POS = marché stabilisé ; NEG = marché nerveux).</p>
 <p><b>COT</b> = positionnement des “gros”. Un percentile extrême = foule pleine d'un côté → risque de retournement.</p>
 <p class='histo'>Règle d'or : ces couches <b>informent et modulent la taille</b> ; elles ne déclenchent jamais un trade. La structure + la cassure décident.</p></div>
@@ -356,7 +357,7 @@ def conseil_systeme(r, reg, metal, gex=None, cot=None, opt=None):
     t.append(f"Stop loss obligatoire à <b>{r['stop']:.2f}</b>, jamais élargi.")
     if r["alerte"]:
         t.append("Contexte fragile : <b>taille réduite</b>, ne pas courir après le prix.")
-    t.append("Sorties par tiers (TP1/TP2) ; après TP1, remonter le stop au prix d'entrée.")
+    t.append("Sorties par tiers : TP1 (le plus proche) puis TP2 ; après TP1, remonter le stop au prix d'entrée.")
     bonus = []
     if gex:
         if gex["gex_regime"] == "POS" and "LONG" in d:
@@ -537,8 +538,8 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
                                f"— risque {risque_e:.2f} €{note}</p>")
 
             tps = r["tps"]
-            tp1 = fmt(tps[0][0]) if len(tps) > 0 else "—"
-            tp2 = fmt(tps[1][0]) if len(tps) > 1 else "—"
+            tp1 = fmt(tps[0]) if len(tps) > 0 else "—"
+            tp2 = fmt(tps[1]) if len(tps) > 1 else "—"
             tp3 = "—"
 
             pos_html = ""
@@ -627,12 +628,67 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         components.html(html, height=6000, scrolling=True)
 
         csv = pd.DataFrame(lignes_journal).to_csv(index=False).encode("utf-8")
-        st.download_button("📥 Télécharger le journal CSV", csv,
+        st.download_button("📥 Télécharger le journal CSV des signaux", csv,
                            file_name="journal_signaux.csv", mime="text/csv")
 else:
     st.info("Clique sur « Générer l'analyse du jour » pour produire le rapport complet.")
 
-# ================= GRAPHIQUES (TradingView) — CORrigés : SPY/QQQ =================
+# ================= JOURNAL DE PAPER TRADING (toujours visible) =================
+try:
+    st.markdown("## 📒 Journal de paper trading")
+    up = st.file_uploader("Charge ton journal CSV précédent (pour continuer la série)", type=["csv"])
+    trades = []
+    if up is not None:
+        try:
+            trades = pd.read_csv(up).to_dict("records")
+        except Exception:
+            st.warning("CSV illisible — journal vierge.")
+
+    with st.expander("➕ Ajouter un trade simulé"):
+        with st.form("form_trade"):
+            c1, c2 = st.columns(2)
+            actif = c1.selectbox("Actif", ["BTC-USD", "ETH-USD", "SOL-USD", "OR (GC)", "ARGENT (SI)", "S&P 500 (ES)", "NASDAQ 100 (NQ)"])
+            direction = c2.selectbox("Sens", ["LONG", "SHORT"])
+            entree = st.number_input("Prix d'entrée", value=0.0, format="%.2f")
+            stop = st.number_input("Stop", value=0.0, format="%.2f")
+            sortie = st.number_input("Prix de sortie (0 si encore ouvert)", value=0.0, format="%.2f")
+            issue = st.selectbox("Issue", ["ouvert", "stop", "sortie"])
+            note = st.text_input("Note (discipline, émotion, contexte)")
+            ok = st.form_submit_button("Ajouter au journal")
+        if ok and entree > 0 and stop > 0 and stop != entree:
+            risk = abs(entree - stop)
+            if issue == "stop":
+                r_res = -1.0
+            elif issue == "sortie" and sortie > 0:
+                r_res = (sortie - entree) / risk if direction == "LONG" else (entree - sortie) / risk
+            else:
+                r_res = 0.0
+            trades.append({"date": str(pd.Timestamp.now().date()), "actif": actif,
+                           "direction": direction, "entree": entree, "stop": stop,
+                           "sortie": sortie, "issue": issue, "R": round(r_res, 2), "note": note})
+
+    if trades:
+        dfj = pd.DataFrame(trades)
+        clos = dfj[dfj["issue"].isin(["stop", "sortie"])]
+        wr = (clos["R"] > 0).mean() * 100 if len(clos) else 0.0
+        cum = float(clos["R"].sum()) if len(clos) else 0.0
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Trades (total)", len(dfj))
+        m2.metric("Win rate (clos)", f"{wr:.0f} %")
+        m3.metric("R cumulé", f"{cum:+.2f}")
+        if cum <= -2.0:
+            st.error("🛑 CIRCUIT BREAKER : −2 R atteint → pause jusqu'à lundi. Le capital d'abord.")
+        st.dataframe(dfj, use_container_width=True)
+        st.download_button("💾 Télécharger le journal mis à jour",
+                           dfj.to_csv(index=False).encode("utf-8"),
+                           file_name="journal_paper_trading.csv", mime="text/csv")
+        st.caption("⚠️ L'app ne garde rien en mémoire : après chaque ajout, télécharge le CSV mis à jour et recharge-le la prochaine fois.")
+    else:
+        st.info("Aucun trade enregistré pour l'instant. Ajoute ton premier trade simulé quand un signal est confirmé.")
+except Exception as e:
+    st.warning(f"Section journal indisponible : {e}")
+
+# ================= GRAPHIQUES (TradingView) — toujours visibles =================
 st.markdown("## 📈 Graphiques (H4 — unité de temps de la stratégie)")
 TV_SYMBOL = {"BTC-USD": "BINANCE:BTCUSDT", "ETH-USD": "BINANCE:ETHUSDT", "SOL-USD": "BINANCE:SOLUSDT",
              "GC=F": "TVC:GOLD", "SI=F": "TVC:SILVER", "^GSPC": "AMEX:SPY", "^NDX": "NASDAQ:QQQ"}
