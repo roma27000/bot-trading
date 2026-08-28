@@ -162,28 +162,41 @@ def _analyser(symbole):
         cands = []
         if td == 1:
             lvl = H4["High"].rolling(20).max().shift(1).iloc[i]
-            if r4["Close"] > lvl: cands.append(("CASSE", r4["Close"], lvl - 2*atr))
+            if r4["Close"] > lvl:
+                idx_c = i
+                for j in range(max(0, i-40), i+1):
+                    if H4["Close"].iloc[j] > lvl:
+                        idx_c = j
+                        break
+                cands.append(("CASSE", r4["Close"], lvl - 2*atr, idx_c))
             for (zf, ty, top, bot) in fvg_zones(H4):
                 if ty != "B" or zf > i or zf < i-40: continue
                 if (H4["Close"].iloc[zf:i] < bot).any(): continue
-                if r4["Low"] <= top: cands.append(("FVG", top, bot - 0.5*atr))
+                if abs(r4["Close"] - top) <= 2*atr: cands.append(("FVG", top, bot - 0.5*atr, zf))
         elif td == -1:
             lvl = H4["Low"].rolling(20).min().shift(1).iloc[i]
-            if r4["Close"] < lvl: cands.append(("CASSE", r4["Close"], lvl + 2*atr))
+            if r4["Close"] < lvl:
+                idx_c = i
+                for j in range(max(0, i-40), i+1):
+                    if H4["Close"].iloc[j] < lvl:
+                        idx_c = j
+                        break
+                cands.append(("CASSE", r4["Close"], lvl + 2*atr, idx_c))
             for (zf, ty, top, bot) in fvg_zones(H4):
                 if ty != "S" or zf > i or zf < i-40: continue
                 if (H4["Close"].iloc[zf:i] > top).any(): continue
-                if r4["High"] >= bot: cands.append(("FVG", bot, top + 0.5*atr))
+                if abs(r4["Close"] - bot) <= 2*atr: cands.append(("FVG", bot, top + 0.5*atr, zf))
         base = {"prix": float(r4["Close"]), "atr": float(atr), "score": td,
                 "direction": direction, "alerte": alerte, "rsi_d1": float(rd1["RSI"]),
                 "etat_w": etat_cloud(rw1), "etat_d": etat_cloud(rd1), "etat_h4": etat_cloud(r4),
-                "date_h4": h4.index[-1]}
+                "date_h4": h4.index[-1], "raison": None}
         if direction == "ATTENTE" or not cands:
             base.update({"scenario": "-", "entree": None, "stop": None, "rr": None, "tps": [],
                          "statut": "ATTENTE" if direction == "ATTENTE" else "REJETÉ"})
             return base
-        best = None
-        for (ns, e, s) in cands:
+        # --- Cycle de vie du setup : ACTIF / INVALIDÉ / PARTI / TERMINÉ ---
+        etats = []
+        for (ns, e, s, zf) in cands:
             risk = abs(e - s)
             if risk <= 0: continue
             if td == 1:
@@ -191,16 +204,34 @@ def _analyser(symbole):
                 if t_struct <= e: continue
                 tps = sorted([t_struct, e + 2*risk], key=lambda x: abs(x - e))
                 rr = (tps[0] - e) / risk
+                win = H4.iloc[zf:i+1]
+                stop_t = bool((win["Low"] <= s).any())
+                tp_t = bool((win["High"] >= tps[0]).any())
+                parti = bool(r4["Close"] > e + risk)
             else:
                 t_struct = float(rd1["LL20"])
                 if t_struct >= e: continue
                 tps = sorted([t_struct, e - 2*risk], key=lambda x: abs(x - e))
                 rr = (e - tps[0]) / risk
-            if best is None or rr > best[3]: best = (ns, e, s, rr, tps)
-        if not best:
+                win = H4.iloc[zf:i+1]
+                stop_t = bool((win["High"] >= s).any())
+                tp_t = bool((win["Low"] <= tps[0]).any())
+                parti = bool(r4["Close"] < e - risk)
+            if stop_t: etat = "INVALIDE"
+            elif tp_t: etat = "TERMINE"
+            elif parti: etat = "PARTI"
+            else: etat = "ACTIF"
+            etats.append((ns, e, s, rr, tps, etat))
+        if not etats:
             base.update({"scenario": "-", "entree": None, "stop": None, "rr": None, "tps": [], "statut": "REJETÉ"})
             return base
-        ns, e, s, rr, tps = best
+        actifs = [x for x in etats if x[5] == "ACTIF"]
+        pool = actifs if actifs else etats
+        ns, e, s, rr, tps, etat = max(pool, key=lambda x: x[3])
+        if etat != "ACTIF":
+            base.update({"scenario": ns, "entree": e, "stop": s, "rr": rr, "tps": tps,
+                         "statut": "REJETÉ", "raison": etat})
+            return base
         stt = "PRÉFÉRÉ" if rr >= 2 else ("ACCEPTABLE" if rr >= RR_MIN else "REJETÉ")
         base.update({"scenario": ns, "entree": e, "stop": s, "rr": rr, "tps": tps, "statut": stt})
         return base
@@ -294,8 +325,9 @@ def get_metaux():
 CONCEPTS = """
 <div class='card'><div class='top'><h2>📚 Comprendre le système (langage simple)</h2></div>
 <p><b>Structure de Dow</b> = la boussole. Tendance haussière = sommets et creux ascendants (HH/HL) ; on ne trade que dans le sens de la structure Daily.</p>
-<p><b>FVG (Fair Value Gap)</b> = zone de déséquilibre sur 3 bougies ; le prix y revient souvent → zone d'entrée privilégiée.</p>
+<p><b>FVG (Fair Value Gap)</b> = zone de déséquilibre sur 3 bougies ; le prix y revient souvent → zone d'entrée privilégiée. Tant que la zone n'est pas comblée, le plan reste affiché “en attente”.</p>
 <p><b>Casse H4</b> = confirmation par clôture au-delà du plus haut/bas récent.</p>
+<p><b>Cycle de vie d'un setup</b> : <b>ACTIF</b> (prix dans la fenêtre utile) · <b>INVALIDÉ</b> (stop touché → thèse morte) · <b>PARTI</b> (prix parti au-delà de 1R sans toi → ne pas courir) · <b>TERMINÉ</b> (TP1 touché). Un setup périmé n'est plus proposé.</p>
 <p><b>TP1 / TP2</b> = objectifs triés par distance : TP1 = le plus proche (première sortie), TP2 = le suivant.</p>
 <p><b>IV (volatilité implicite)</b> = l'agitation attendue. <b>Skew</b> = le prix de la peur. <b>Max pain</b> = aimant de fin de semaine.</p>
 <p><b>GEX</b> = le sens des amortisseurs (POS = marché stabilisé ; NEG = marché nerveux).</p>
@@ -341,7 +373,17 @@ def lecture_metaux(m):
 def conseil_systeme(r, reg, metal, gex=None, cot=None, opt=None):
     d = r["direction"]
     if d == "ATTENTE": return "Aucune action. Pas de structure Daily claire : le système attend."
-    if r["statut"] == "REJETÉ": return "Aucune action. R:R insuffisant : le système protège ton capital."
+    if r["statut"] == "REJETÉ":
+        raison = r.get("raison")
+        if raison == "INVALIDE":
+            return "Setup invalidé : le stop a été touché → la thèse est morte, on passe à autre chose."
+        if raison == "PARTI":
+            return "Setup parti sans toi : ne pas courir après le prix, attendre un nouveau setup."
+        if raison == "TERMINE":
+            return "Setup terminé : le TP1 a été touché → on attend un nouveau setup."
+        if r["entree"] is None:
+            return "Aucune action. Pas de setup actif pour l'instant (ni cassure confirmée, ni zone FVG proche) : le système attend."
+        return "Aucune action. R:R insuffisant : le système protège ton capital."
     if reg == "RISK-OFF" and "LONG" in d and not metal:
         return "VETO MACRO : pas de position longue risquée dans ce régime (métaux exceptés)."
     if reg == "RISK-ON" and "SHORT" in d: return "VETO MACRO : pas de position courte dans ce régime."
@@ -353,7 +395,7 @@ def conseil_systeme(r, reg, metal, gex=None, cot=None, opt=None):
             sens = "au-dessus" if "LONG" in d else "en dessous"
             t.append(f"Attendre une clôture H4 {sens} de <b>{r['entree']:.2f}</b> avant d'entrer.")
     elif r["scenario"] == "FVG":
-        t.append(f"Attendre un repli dans la zone FVG : entrée limite à <b>{r['entree']:.2f}</b>.")
+        t.append(f"Zone FVG active : entrée limite à <b>{r['entree']:.2f}</b> si le prix (re)descend dans la zone — le plan reste affiché tant que la zone n'est pas comblée.")
     t.append(f"Stop loss obligatoire à <b>{r['stop']:.2f}</b>, jamais élargi.")
     if r["alerte"]:
         t.append("Contexte fragile : <b>taille réduite</b>, ne pas courir après le prix.")
@@ -463,7 +505,8 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             opt = deribit_options.get_options_deribit(sym) if USE_OPTIONS else None
             metal = nom in METAUX
             veto = (regime_actuel == "RISK-OFF" and "LONG" in r["direction"] and not metal)
-            actionnable = r["entree"] is not None and r["statut"] in ("PRÉFÉRÉ", "ACCEPTABLE") and not veto
+            actionnable = (r["entree"] is not None and r["statut"] in ("PRÉFÉRÉ", "ACCEPTABLE")
+                           and r.get("raison") is None and not veto)
             dist = abs(r["entree"] - r["prix"]) / r["prix"] * 100 if r["entree"] else None
             q, qdet = (qualite(r, gex) if r["entree"] else (0, ""))
             resultats.append(dict(sym=sym, nom=nom, coin=coin, r=r, gex=gex, cot=cot, opt=opt,
@@ -597,6 +640,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             lignes_journal.append({
                 "date": now.date(), "actif": x["sym"], "direction": r["direction"],
                 "scenario": r["scenario"], "statut": r["statut"],
+                "raison": r.get("raison"),
                 "prix_actuel": round(r["prix"], 2), "entree": r["entree"], "stop": r["stop"],
                 "distance_pct": round(x["dist"], 2) if x["dist"] is not None else None,
                 "qualite": x["q"], "tp1": tp1, "tp2": tp2, "tp3": tp3,
@@ -616,7 +660,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         html = f"""<!DOCTYPE html><html lang='fr'><head><meta charset='utf-8'>{CSS}</head><body>
         <h1>📊 Rapport de trading Pro — {now.strftime('%d/%m/%Y')}</h1>
         <div class='meta'>Régime macro : <b>{regime_actuel}</b> | Capital : {capital:.0f} € |
-        Risque modulé : <b>{risque_pct} %</b> par trade | Cœur : Dow Daily + FVG/Casse H4</div>
+        Risque modulé : <b>{risque_pct} %</b> par trade | Cœur : Dow Daily + FVG/Casse H4 + cycle de vie des setups</div>
         {resume_html}
         {metaux_html}
         {CONCEPTS}
