@@ -1,11 +1,11 @@
-# ===== alerts.py v3 — sentinelle H4 (Dow + cassure) via ntfy.sh =====
+# ===== alerts.py v4 — sentinelle H4 (cassures + FVG) via ntfy.sh =====
 import requests
 import yfinance as yf
 import pandas as pd
 
 NTFY_TOPIC = "roma-moula-k7p2x9"   # ton canal privé — ne pas partager
 
-def contrats_actifs():
+def metal_symbols():
     today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
     COMEX_MONTHS = [("G",2),("J",4),("M",6),("Q",8),("V",10),("Z",12)]
     CME_MONTHS = [("H",3),("M",6),("U",9),("Z",12)]
@@ -43,7 +43,7 @@ def contrats_actifs():
     nq = choose("NQ", CME_MONTHS, ".CME", "NQ=F")
     return gc, si, es, nq
 
-GC_SYM, SI_SYM, ES_SYM, NQ_SYM = contrats_actifs()
+GC_SYM, SI_SYM, ES_SYM, NQ_SYM = metal_symbols()
 ACTIFS = [("BTC-USD", "Bitcoin"), ("ETH-USD", "Ethereum"), ("SOL-USD", "Solana"),
           (GC_SYM, "Or"), (SI_SYM, "Argent"), (ES_SYM, "S&P 500"), (NQ_SYM, "Nasdaq 100")]
 
@@ -70,6 +70,14 @@ def tendance_dow(df, k=5):
             elif lh and ll: t = -1
         trend[idx[j]] = t
     return trend
+
+def fvg_zones(df):
+    h, l = df["High"].values, df["Low"].values
+    z = []
+    for i in range(2, len(df)):
+        if l[i] > h[i-2]: z.append((i, "B", l[i], h[i-2]))
+        elif h[i] < l[i-2]: z.append((i, "S", l[i-2], h[i]))
+    return z
 
 def send(msg):
     try:
@@ -98,25 +106,35 @@ for sym, nom in ACTIFS:
         i = len(H4) - 1
         last = H4.iloc[-1]
         prev = H4.iloc[-2]
-        msg = None
+        msgs = []
+
         if td == 1:
             lvl = H4["HH20"].shift(1).iloc[i]
             if last["Close"] > lvl and prev["Close"] <= lvl:
-                stop = lvl - 2*last["ATR"]
-                msg = f"{nom} : LONG confirmé (cassure H4 au-dessus de {lvl:.2f}). Stop : {stop:.2f}. Vérifie le rapport avant décision."
+                msgs.append(f"{nom} : LONG confirmé (cassure H4 au-dessus de {lvl:.2f}). Stop : {lvl - 2*last['ATR']:.2f}. Vérifie le rapport avant décision.")
+            for (zf, ty, top, bot) in fvg_zones(H4):
+                if ty != "B" or zf > i or zf < i-40: continue
+                if (H4["Close"].iloc[zf:i] < bot).any(): continue
+                if last["Low"] <= top and prev["Low"] > top:
+                    msgs.append(f"{nom} : repli dans la zone FVG → entrée limite {top:.2f}, stop {bot - 0.5*last['ATR']:.2f}. Vérifie le rapport avant décision.")
         elif td == -1:
             lvl = H4["LL20"].shift(1).iloc[i]
             if last["Close"] < lvl and prev["Close"] >= lvl:
-                stop = lvl + 2*last["ATR"]
-                msg = f"{nom} : SHORT confirmé (cassure H4 en dessous de {lvl:.2f}). Stop : {stop:.2f}. Vérifie le rapport avant décision."
+                msgs.append(f"{nom} : SHORT confirmé (cassure H4 en dessous de {lvl:.2f}). Stop : {lvl + 2*last['ATR']:.2f}. Vérifie le rapport avant décision.")
+            for (zf, ty, top, bot) in fvg_zones(H4):
+                if ty != "S" or zf > i or zf < i-40: continue
+                if (H4["Close"].iloc[zf:i] > top).any(): continue
+                if last["High"] >= bot and prev["High"] < bot:
+                    msgs.append(f"{nom} : repli dans la zone FVG → entrée limite {bot:.2f}, stop {top + 0.5*last['ATR']:.2f}. Vérifie le rapport avant décision.")
 
         ts = last.name
         if ts.tz is None:
             ts = ts.tz_localize("UTC")
         age_h = (pd.Timestamp.now(tz="UTC") - ts).total_seconds() / 3600
-        if msg and age_h <= 5:
-            send(msg)
+        if msgs and age_h <= 5:
+            for m in msgs:
+                send(m)
         else:
-            print(f"{nom} : pas de nouvelle cassure (clôture {last['Close']:.2f})")
+            print(f"{nom} : rien de nouveau à signaler (clôture {last['Close']:.2f})")
     except Exception as e:
         print(f"{nom} : erreur -> {e}")
