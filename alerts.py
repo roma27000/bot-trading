@@ -1,140 +1,269 @@
-# ===== alerts.py v4 — sentinelle H4 (cassures + FVG) via ntfy.sh =====
+# ===== alerts.py v5 — sentinelle H4 cassures + FVG + contrats CME corrigés =====
 import requests
 import yfinance as yf
 import pandas as pd
 
-NTFY_TOPIC = "roma-moula-k7p2x9"   # ton canal privé — ne pas partager
+NTFY_TOPIC = "roma-moula-k7p2x9"  # ton canal privé — ne pas partager
 
+# ================= CONTRATS ACTIFS — CORRECTION CME / QUANTFURY =================
 def metal_symbols():
     today = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
-    COMEX_MONTHS = [("G",2),("J",4),("M",6),("Q",8),("V",10),("Z",12)]
-    CME_MONTHS = [("H",3),("M",6),("U",9),("Z",12)]
-    def roll_cutoff(year, month):
+
+    COMEX_MONTHS = [("G", 2), ("J", 4), ("M", 6), ("Q", 8), ("V", 10), ("Z", 12)]
+    CME_MONTHS = [("H", 3), ("M", 6), ("U", 9), ("Z", 12)]
+
+    def third_friday(year, month):
+        d = pd.Timestamp(year=year, month=month, day=1)
+        offset = (4 - d.weekday()) % 7
+        return d + pd.Timedelta(days=offset + 14)
+
+    def cutoff_comex(year, month):
         first_day = pd.Timestamp(year=year, month=month, day=1)
         prev_month_end = first_day - pd.Timedelta(days=1)
         last_bday = pd.bdate_range(end=prev_month_end, periods=1)[0]
         return last_bday - pd.offsets.BDay(5)
-    def candidates(root, months, suffix):
+
+    def cutoff_cme(year, month):
+        return third_friday(year, month) - pd.Timedelta(days=5)
+
+    def candidates(root, months, cutoff_fn, suffix):
         out = []
-        for year in [today.year, today.year+1]:
+        for year in [today.year, today.year + 1]:
             for code, month in months:
-                if today < roll_cutoff(year, month):
+                if today < cutoff_fn(year, month):
                     out.append(f"{root}{code}{str(year)[-2:]}{suffix}")
         return out[:6]
-    def choose(root, months, suffix, fallback):
+
+    def choose(root, months, cutoff_fn, suffix, fallback):
         best = None
-        for tk in candidates(root, months, suffix):
+
+        for tk in candidates(root, months, cutoff_fn, suffix):
             try:
                 hist = yf.Ticker(tk).history(interval="1d", period="10d").dropna()
-                if hist.empty: continue
+
+                if hist.empty:
+                    continue
+
                 last_date = hist.index[-1]
+
                 if getattr(last_date, "tzinfo", None) is not None:
                     last_date = last_date.tz_localize(None)
-                if (today - last_date.normalize()).days > 5: continue
-                vol = float(hist["Volume"].tail(5).mean()) if "Volume" in hist.columns and hist["Volume"].dropna().shape[0] else 0
+
+                if (today - last_date.normalize()).days > 5:
+                    continue
+
+                vol = float(hist["Volume"].tail(5).mean()) if "Volume" in hist.columns else 0
+
                 if best is None or vol > best[0]:
                     best = (vol, tk)
+
             except Exception:
                 continue
+
         return best[1] if best else fallback
-    gc = choose("GC", COMEX_MONTHS, ".CMX", "GC=F")
-    si = choose("SI", COMEX_MONTHS, ".CMX", "SI=F")
-    es = choose("ES", CME_MONTHS, ".CME", "ES=F")
-    nq = choose("NQ", CME_MONTHS, ".CME", "NQ=F")
+
+    gc = choose("GC", COMEX_MONTHS, cutoff_comex, ".CMX", "GC=F")
+    si = choose("SI", COMEX_MONTHS, cutoff_comex, ".CMX", "SI=F")
+    es = choose("ES", CME_MONTHS, cutoff_cme, ".CME", "ES=F")
+    nq = choose("NQ", CME_MONTHS, cutoff_cme, ".CME", "NQ=F")
+
     return gc, si, es, nq
 
 GC_SYM, SI_SYM, ES_SYM, NQ_SYM = metal_symbols()
-ACTIFS = [("BTC-USD", "Bitcoin"), ("ETH-USD", "Ethereum"), ("SOL-USD", "Solana"),
-          (GC_SYM, "Or"), (SI_SYM, "Argent"), (ES_SYM, "S&P 500"), (NQ_SYM, "Nasdaq 100")]
+
+ACTIFS = [
+    ("BTC-USD", "Bitcoin"),
+    ("ETH-USD", "Ethereum"),
+    ("SOL-USD", "Solana"),
+    (GC_SYM, "Or"),
+    (SI_SYM, "Argent"),
+    (ES_SYM, "S&P 500"),
+    (NQ_SYM, "Nasdaq 100"),
+]
 
 def resample_4h(h1):
-    return h1.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
+    return h1.resample("4h").agg({
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum"
+    }).dropna()
 
 def tendance_dow(df, k=5):
     h, l = df["High"].values, df["Low"].values
-    n = len(df); ev = []
-    for i in range(k, n-k):
-        if h[i] >= h[i-k:i].max() and h[i] >= h[i+1:i+k+1].max(): ev.append((i+k, "H", h[i]))
-        if l[i] <= l[i-k:i].min() and l[i] <= l[i+1:i+k+1].min(): ev.append((i+k, "L", l[i]))
+    n = len(df)
+    ev = []
+
+    for i in range(k, n - k):
+        if h[i] >= h[i-k:i].max() and h[i] >= h[i+1:i+k+1].max():
+            ev.append((i+k, "H", h[i]))
+        if l[i] <= l[i-k:i].min() and l[i] <= l[i+1:i+k+1].min():
+            ev.append((i+k, "L", l[i]))
+
     ev.sort(key=lambda x: x[0])
-    trend = {}; sh = []; sl = []; e = 0
+
+    trend = {}
+    sh, sl = [], []
+    e = 0
     idx = df.index
+
     for j in range(n):
         while e < len(ev) and ev[e][0] <= j:
-            (sh if ev[e][1] == "H" else sl).append(ev[e][2]); e += 1
+            if ev[e][1] == "H":
+                sh.append(ev[e][2])
+            else:
+                sl.append(ev[e][2])
+            e += 1
+
         t = 0
+
         if len(sh) >= 2 and len(sl) >= 2:
             hh, hl = sh[-1] > sh[-2], sl[-1] > sl[-2]
             lh, ll = sh[-1] < sh[-2], sl[-1] < sl[-2]
-            if hh and hl: t = 1
-            elif lh and ll: t = -1
+
+            if hh and hl:
+                t = 1
+            elif lh and ll:
+                t = -1
+
         trend[idx[j]] = t
+
     return trend
 
 def fvg_zones(df):
     h, l = df["High"].values, df["Low"].values
     z = []
+
     for i in range(2, len(df)):
-        if l[i] > h[i-2]: z.append((i, "B", l[i], h[i-2]))
-        elif h[i] < l[i-2]: z.append((i, "S", l[i-2], h[i]))
+        if l[i] > h[i-2]:
+            z.append((i, "B", l[i], h[i-2]))
+        elif h[i] < l[i-2]:
+            z.append((i, "S", l[i-2], h[i]))
+
     return z
 
 def send(msg):
     try:
-        r = requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=msg.encode("utf-8"),
-                          headers={"Title": "Alerte trading", "Tags": "chart"}, timeout=10)
+        r = requests.post(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=msg.encode("utf-8"),
+            headers={
+                "Title": "Alerte trading",
+                "Tags": "chart"
+            },
+            timeout=10
+        )
         print("Envoyé :", msg, "->", r.status_code)
     except Exception as e:
         print("Erreur envoi :", e)
 
+# ================= BOUCLE SENTINELLE =================
 for sym, nom in ACTIFS:
     try:
         t = yf.Ticker(sym)
+
         h1 = t.history(interval="1h", period="60d")
         h4 = resample_4h(h1)
         d1 = t.history(interval="1d", period="5y")
+
         if len(h4) < 210 or len(d1) < 210:
+            print(f"{nom} : données insuffisantes")
             continue
+
         H4 = h4.copy()
+
         H4["HH20"] = H4["High"].rolling(20).max()
         H4["LL20"] = H4["Low"].rolling(20).min()
-        tr = pd.concat([H4["High"]-H4["Low"], (H4["High"]-H4["Close"].shift(1)).abs(),
-                        (H4["Low"]-H4["Close"].shift(1)).abs()], axis=1).max(axis=1)
+
+        tr = pd.concat([
+            H4["High"] - H4["Low"],
+            (H4["High"] - H4["Close"].shift(1)).abs(),
+            (H4["Low"] - H4["Close"].shift(1)).abs()
+        ], axis=1).max(axis=1)
+
         H4["ATR"] = tr.ewm(alpha=1/14, adjust=False).mean()
 
         td = tendance_dow(d1, k=5).get(d1.index[-1], 0)
+
         i = len(H4) - 1
         last = H4.iloc[-1]
         prev = H4.iloc[-2]
+
         msgs = []
 
+        # ========== LONG ==========
         if td == 1:
             lvl = H4["HH20"].shift(1).iloc[i]
+
+            # Cassure H4
             if last["Close"] > lvl and prev["Close"] <= lvl:
-                msgs.append(f"{nom} : LONG confirmé (cassure H4 au-dessus de {lvl:.2f}). Stop : {lvl - 2*last['ATR']:.2f}. Vérifie le rapport avant décision.")
-            for (zf, ty, top, bot) in fvg_zones(H4):
-                if ty != "B" or zf > i or zf < i-40: continue
-                if (H4["Close"].iloc[zf:i] < bot).any(): continue
+                stop = lvl - 2 * last["ATR"]
+                msgs.append(
+                    f"{nom} : LONG confirmé — cassure H4 au-dessus de {lvl:.2f}. "
+                    f"Stop : {stop:.2f}. Vérifie le rapport avant décision."
+                )
+
+            # Repli FVG haussier
+            for zf, ty, top, bot in fvg_zones(H4):
+                if ty != "B" or zf > i or zf < i - 40:
+                    continue
+
+                # Zone invalidée si clôture sous le bas du gap
+                if (H4["Close"].iloc[zf:i] < bot).any():
+                    continue
+
+                # Nouvelle entrée dans la zone
                 if last["Low"] <= top and prev["Low"] > top:
-                    msgs.append(f"{nom} : repli dans la zone FVG → entrée limite {top:.2f}, stop {bot - 0.5*last['ATR']:.2f}. Vérifie le rapport avant décision.")
+                    stop = bot - 0.5 * last["ATR"]
+                    msgs.append(
+                        f"{nom} : repli dans zone FVG haussière. "
+                        f"Entrée limite : {top:.2f}. Stop : {stop:.2f}. "
+                        f"Vérifie le rapport avant décision."
+                    )
+
+        # ========== SHORT ==========
         elif td == -1:
             lvl = H4["LL20"].shift(1).iloc[i]
+
+            # Cassure H4
             if last["Close"] < lvl and prev["Close"] >= lvl:
-                msgs.append(f"{nom} : SHORT confirmé (cassure H4 en dessous de {lvl:.2f}). Stop : {lvl + 2*last['ATR']:.2f}. Vérifie le rapport avant décision.")
-            for (zf, ty, top, bot) in fvg_zones(H4):
-                if ty != "S" or zf > i or zf < i-40: continue
-                if (H4["Close"].iloc[zf:i] > top).any(): continue
+                stop = lvl + 2 * last["ATR"]
+                msgs.append(
+                    f"{nom} : SHORT confirmé — cassure H4 sous {lvl:.2f}. "
+                    f"Stop : {stop:.2f}. Vérifie le rapport avant décision."
+                )
+
+            # Repli FVG baissier
+            for zf, ty, top, bot in fvg_zones(H4):
+                if ty != "S" or zf > i or zf < i - 40:
+                    continue
+
+                # Zone invalidée si clôture au-dessus du haut du gap
+                if (H4["Close"].iloc[zf:i] > top).any():
+                    continue
+
+                # Nouvelle entrée dans la zone
                 if last["High"] >= bot and prev["High"] < bot:
-                    msgs.append(f"{nom} : repli dans la zone FVG → entrée limite {bot:.2f}, stop {top + 0.5*last['ATR']:.2f}. Vérifie le rapport avant décision.")
+                    stop = top + 0.5 * last["ATR"]
+                    msgs.append(
+                        f"{nom} : repli dans zone FVG baissière. "
+                        f"Entrée limite : {bot:.2f}. Stop : {stop:.2f}. "
+                        f"Vérifie le rapport avant décision."
+                    )
 
         ts = last.name
+
         if ts.tz is None:
             ts = ts.tz_localize("UTC")
+
         age_h = (pd.Timestamp.now(tz="UTC") - ts).total_seconds() / 3600
+
         if msgs and age_h <= 5:
             for m in msgs:
                 send(m)
         else:
-            print(f"{nom} : rien de nouveau à signaler (clôture {last['Close']:.2f})")
+            print(f"{nom} : rien de nouveau à signaler — clôture {last['Close']:.2f} | symbole {sym}")
+
     except Exception as e:
         print(f"{nom} : erreur -> {e}")
