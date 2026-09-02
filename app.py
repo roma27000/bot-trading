@@ -169,7 +169,7 @@ def _analyser(symbole):
                 cands.append(("CASSE", r4["Close"], lvl - 2*atr, idx_c))
             for (zf, ty, top, bot) in fvg_zones(H4):
                 if ty != "B" or zf > i or zf < i-40: continue
-                if (top - bot) < 0.5 * atr: continue          # FVG trop petit = ignoré
+                if (top - bot) < 0.5 * atr: continue
                 if (H4["Close"].iloc[zf:i] < bot).any(): continue
                 if abs(r4["Close"] - top) <= 2*atr: cands.append(("FVG", top, bot - 0.5*atr, zf))
         elif td == -1:
@@ -183,13 +183,13 @@ def _analyser(symbole):
                 cands.append(("CASSE", r4["Close"], lvl + 2*atr, idx_c))
             for (zf, ty, top, bot) in fvg_zones(H4):
                 if ty != "S" or zf > i or zf < i-40: continue
-                if (top - bot) < 0.5 * atr: continue          # FVG trop petit = ignoré
+                if (top - bot) < 0.5 * atr: continue
                 if (H4["Close"].iloc[zf:i] > top).any(): continue
                 if abs(r4["Close"] - bot) <= 2*atr: cands.append(("FVG", bot, top + 0.5*atr, zf))
         base = {"prix": float(r4["Close"]), "atr": float(atr), "score": td,
                 "direction": direction, "alerte": alerte, "rsi_d1": float(rd1["RSI"]),
                 "etat_w": etat_cloud(rw1), "etat_d": etat_cloud(rd1), "etat_h4": etat_cloud(r4),
-                "date_h4": h4.index[-1], "raison": None}
+                "date_h4": h4.index[-1], "raison": None, "indisponible": False}
         if direction == "ATTENTE" or not cands:
             base.update({"scenario": "-", "entree": None, "stop": None, "rr": None, "tps": [],
                          "statut": "ATTENTE" if direction == "ATTENTE" else "REJETÉ"})
@@ -366,6 +366,8 @@ def lecture_metaux(m):
     return " | ".join(n)
 
 def conseil_systeme(r, reg, metal, gex=None, cot=None, opt=None):
+    if r.get("indisponible"):
+        return "Données indisponibles pour cet actif aujourd'hui : ne trade pas sans vérification manuelle. Relance plus tard."
     d = r["direction"]
     if d == "ATTENTE": return "Aucune action. Pas de structure Daily claire : le système attend."
     if r["statut"] == "REJETÉ":
@@ -490,18 +492,25 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
         ACTIFS = [("BTC-USD","Bitcoin","BTC"), ("ETH-USD","Ethereum","ETH"), ("SOL-USD","Solana","SOL"),
                   (GC_SYM,"Or",None), (SI_SYM,"Argent",None),
                   (ES_SYM,"S&P 500",None), (NQ_SYM,"Nasdaq 100",None)]
+        FALLBACK = {GC_SYM: "GC=F", SI_SYM: "SI=F", ES_SYM: "ES=F", NQ_SYM: "NQ=F"}
         for sym, nom, coin in ACTIFS:
             r = analyser_actif(sym)
+            if r is None and sym in FALLBACK:
+                sym = FALLBACK[sym]
+                r = analyser_actif(sym)
             if r is None:
-                continue
+                r = {"prix": None, "atr": None, "score": 0, "direction": "ATTENTE", "alerte": "",
+                     "rsi_d1": None, "etat_w": "—", "etat_d": "—", "etat_h4": "—",
+                     "date_h4": None, "raison": None, "scenario": "-", "entree": None,
+                     "stop": None, "rr": None, "tps": [], "statut": "ATTENTE", "indisponible": True}
             gex = gex_dex.get_gex_dex(sym) if USE_GEX_DEX else None
             cot = cot_data.get_cot(sym) if USE_COT else None
             opt = deribit_options.get_options_deribit(sym) if USE_OPTIONS else None
             metal = nom in METAUX
             veto = (regime_actuel == "RISK-OFF" and "LONG" in r["direction"] and not metal)
             actionnable = (r["entree"] is not None and r["statut"] in ("PRÉFÉRÉ", "ACCEPTABLE")
-                           and r.get("raison") is None and not veto)
-            dist = abs(r["entree"] - r["prix"]) / r["prix"] * 100 if r["entree"] else None
+                           and r.get("raison") is None and not veto and not r.get("indisponible"))
+            dist = abs(r["entree"] - r["prix"]) / r["prix"] * 100 if r["entree"] and r["prix"] else None
             q, qdet = (qualite(r, gex) if r["entree"] else (0, ""))
             resultats.append(dict(sym=sym, nom=nom, coin=coin, r=r, gex=gex, cot=cot, opt=opt,
                                   metal=metal, veto=veto, actionnable=actionnable,
@@ -612,8 +621,10 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
                 dist_html = (f"<p class='prix'>Prix actuel : <b>{r['prix']:.2f}</b> | dernière bougie H4 : {h4_txt} | 🚦 {feu}</p>"
                              f"<p class='histo'>Qualité : {x['q']}/4 — {x['qdet']}</p>")
             else:
-                dist_html = f"<p class='prix'>Prix actuel : <b>{r['prix']:.2f}</b> | dernière bougie H4 : {h4_txt}</p>"
+                prix_txt = f"{r['prix']:.2f}" if r["prix"] is not None else "—"
+                dist_html = f"<p class='prix'>Prix actuel : <b>{prix_txt}</b> | dernière bougie H4 : {h4_txt}</p>"
 
+            rsi_txt = f"{r['rsi_d1']:.1f}" if r["rsi_d1"] is not None else "—"
             cartes += f"""
             <div class='card'>
               <div class='top'><h2>{x['nom']} <span class='sym'>{x['sym']}</span></h2>
@@ -624,7 +635,7 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
               <tr class='niveaux'><td>{fmt(r['entree'])}</td><td>{fmt(r['stop'])}</td>
               <td>{tp1}</td><td>{tp2}</td><td>{tp3}</td></tr></table>
               {taille_html}
-              <p>Macro : régime <b>{regime_actuel}</b> | RSI D1 : {r['rsi_d1']:.1f} | Ichimoku W : {r['etat_w']}</p>
+              <p>Macro : régime <b>{regime_actuel}</b> | RSI D1 : {rsi_txt} | Ichimoku W : {r['etat_w']}</p>
               {pos_html}
               {layers_html}
               <p class='histo'>Historique mesuré (27/08/2026) : {histo}</p>
@@ -634,7 +645,8 @@ if st.button("🔄 Générer l'analyse du jour", type="primary"):
             lignes_journal.append({
                 "date": now.date(), "actif": x["sym"], "direction": r["direction"],
                 "scenario": r["scenario"], "statut": r["statut"], "raison": r.get("raison"),
-                "prix_actuel": round(r["prix"], 2), "entree": r["entree"], "stop": r["stop"],
+                "prix_actuel": round(r["prix"], 2) if r["prix"] is not None else None,
+                "entree": r["entree"], "stop": r["stop"],
                 "distance_pct": round(x["dist"], 2) if x["dist"] is not None else None,
                 "qualite": x["q"], "tp1": tp1, "tp2": tp2, "tp3": tp3,
                 "risque_e": risque_e, "taille_e": taille_e, "unites": unites,
